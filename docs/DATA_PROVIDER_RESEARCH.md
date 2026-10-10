@@ -1,0 +1,192 @@
+# Data Provider Research
+
+**Verified/reviewed:** 2026-10-10
+**Scope:** free, legitimate, usable API or feed access for a private, non-commercial application. Phase 1 made no API calls. Phase 2 now defines normalized quote/bar contracts, tests Alpaca response mapping, and provides a loopback-only backend adapter; provider calls stay disabled until server-side credentials and data-use terms are explicitly configured. Provider access, plan details, entitlements, and terms can change. Re-check official pages and the actual developer/account dashboard before enabling a connector.
+
+## Capability matrix
+
+| Provider/source | Quotes / bars | News / filings / search / social | Free access status | Phase direction |
+|---|---|---|---|---|
+| Schwab Trader API Individual | Quotes, price history, account data are product surfaces, subject to app approval/account entitlement | No general news/search guarantee | Conditional on individual app, linked brokerage account and data entitlements; detailed docs require portal sign-in | First to investigate; do not assume available |
+| Alpaca Market Data Basic | Real-time IEX quotes/trades and historical bars for eligible US stocks/ETFs; one exchange | No broad filings/news required | $0 Basic Trading API plan, authenticated keys; 200 historical API calls/minute; no OTC under ordinary retail Basic access | Limited fallback only; explicitly exclude OTC and never imply consolidated prices |
+| Alpha Vantage | Free standard daily series/quote limited; intraday US data marked Premium | Premium news/sentiment/fundamentals are not assumed free | API key; 25 requests/day on free access per current official support/docs; exact endpoint access varies | EOD fallback only, subject to rate/licensing review |
+| Massive (formerly Polygon.io) | Official aggregates endpoint; Stocks Basic EOD and 2-year plan history | Not selected for news | Official endpoint says Basic plan EOD; quota and full terms require current account/plan confirmation | Candidate only after access/terms check |
+| SEC EDGAR | Not a market-price provider | Filings, company facts, filing archives, Form 4 source documents | Public APIs, no key; descriptive User-Agent; fair-access ceiling 10 req/s | Recommended free filings source |
+| Finnhub | Docs list quotes/candles, endpoints need key | Company/market news endpoints are listed | Current endpoint quotas, exact plan feature access, supported low-priced/OTC symbols, license and retention terms not verifiable in public interactive docs | Do not select until account entitlement and terms are verified |
+| Bright Data Social Media Scraper API | — | Structured X and Reddit public posts/profiles/comments; Reddit keyword/subreddit discovery | Official free tier: 5,000 shared monthly credits, no card required; one credit/request or delivered record according to product; hard stop only on an unfunded account | Single optional social provider/key; platform permissions must be cleared before collection |
+| Google Custom Search JSON API | — | Programmable-engine web search | Official docs say no new customers; existing customers only through 2027-01-01; free 100 queries/day then paid overage | Not usable for new app; exclude |
+| Google News RSS | — | Headline/search feeds | No formal public developer API; Google News terms prohibit bots/spiders monitoring/copying content and restrict display to personal use | Do not use for automated ingestion |
+| Reddit Data API (direct) | — | Posts/comments/search subject to OAuth/API access | Separate direct API requires registration; Reddit User Agreement prohibits automated collection/scraping without permission | No direct Reddit connector; use Bright Data only if separately authorized |
+| X API v2 (direct) | — | Read/search posts | Official docs use paid credits; posts read cost $0.005/resource at research time | No direct X connector; excluded under cost rule |
+| OpenAI API | No market data | Interpretation only | Metered paid API, explicitly allowed; current per-model pricing at official page | Optional later; enforce spending controls |
+| Issuer IR / official releases | No normalized quote API | Company announcements/IR RSS and pages | Often publicly accessible, but endpoint availability, polling, retention and terms are issuer-specific | Free fallback, with per-site terms and provenance |
+
+## Schwab Trader API — investigate first
+
+**Official sources**
+
+- [Trader API Individual product](https://developer.schwab.com/products/trader-api--individual)
+- [Individual developer role guide](https://developer.schwab.com/user-guides/individual-developer/about-individual-developer-role)
+- [Schwab market-data production documentation](https://developer.schwab.com/products/trader-api--individual/details/documentation/Market%20Data%20Production)
+- [Schwab user guides](https://developer.schwab.com/user-guides)
+
+The public portal pages were reachable as URLs but returned access-denied/login-gated content to unauthenticated research. The product docs and account-specific limits therefore require verification in the developer portal with the user's own account; the endpoint shapes below are route names to validate, not confirmation of entitlement.
+
+**Access/authentication:** create a Schwab Developer Portal profile, select the **Individual Developer** role, link an eligible Schwab brokerage account, create/request the Trader API Individual app/product and wait for approval. The individual role is for an app for the developer's own use and is limited to one app according to the role guide. OAuth 2.0 authorization is required. A thinkorswim login/use does **not** itself approve the API app, confer permission to use the API, or ensure real-time exchange data entitlement. Account status/data subscription agreements may affect market-data visibility/fees; verify quote freshness and fees with Schwab directly.
+
+**Relevant route families to confirm after login:** market data `GET https://api.schwabapi.com/marketdata/v1/quotes?symbols=...`, `GET /marketdata/v1/pricehistory?symbol=...&periodType=...&period=...&frequencyType=...&frequency=...`; trader account reads `GET /trader/v1/accounts/accountNumbers` and `GET /trader/v1/accounts/{accountNumber}`. The quote object commonly exposes quote timestamps, bid/ask/last, volume and exchange fields; history exposes candles with open/high/low/close/volume and epoch timestamp. Confirm exact response schemas, supported periods, small-price/OTC symbol coverage, permissions, and applicable endpoint limits in official authenticated documentation before coding. Read-only market/account scopes are the only relevant planned permission in Phase 2. Order routes are out of scope.
+
+**Limits/cost/data rights:** no reliable public, unauthenticated, individual-account-specific quota, approval time, market-data fee schedule or storage/redisplay/AI-processing permission could be verified in this research. Do not assume data is free because Trader API account access is available. Do not request paid exchange entitlements. Once approved, read the app's assigned quotas/rate limits and Schwab account terms; stop rather than upgrade if free use is not legitimately available. Verify whether snapshots can be retained or passed to OpenAI.
+
+**Test request:** after approval only, follow the portal's OAuth flow and use the authorized bearer token against the documented quote endpoint, for example `GET /marketdata/v1/quotes?symbols=...`; then compare the returned `quoteTime`/`tradeTime`, exchange, bid/ask/last and entitlement indicators with thinkorswim. Test documented historical `pricehistory` with a small period. Never place an order for a market-data test. Redact token/account ids.
+
+**Free fallback:** Alpaca IEX or Alpha Vantage free daily candles, each with explicit coverage/freshness disclaimers. They are not consolidated real-time alternatives.
+
+## Alpaca Market Data — constrained candidate
+
+**Official sources:** [Historical Stock Data guide](https://docs.alpaca.markets/us/docs/historical-stock-data-1), [historical bars reference](https://docs.alpaca.markets/us/reference/stockbars), [latest quote reference](https://docs.alpaca.markets/us/reference/stocklatestquotes-1), [latest trades reference](https://docs.alpaca.markets/us/reference/stocklatesttrades-1), [market-data plans and authentication](https://docs.alpaca.markets/us/docs/about-market-data-api), and [Market Data FAQ](https://docs.alpaca.markets/us/docs/market-data-faq).
+
+**Access/authentication:** create an individual Trading API account and use the free Basic plan (also the default market-data plan for paper and live trading accounts). Generate credentials in the authenticated Alpaca dashboard. Stock endpoints require `APCA-API-KEY-ID` and `APCA-API-SECRET-KEY` request headers. Do not place either key in Flutter Web/mobile bundles, query parameters, or logs; later HTTP access must go through the local/self-hosted backend. Basic market data is documented as $0; do not enable Algo Trader Plus, paid SIP, an upgrade, or billing-dependent fallback.
+
+**Exact endpoints and response fields:**
+
+- Latest IEX trade: `GET https://data.alpaca.markets/v2/stocks/{symbol}/trades/latest?feed=iex`; response has `symbol` and `trade`, including `p` (price), `s` (size), `t` (RFC-3339 time), `x` (exchange), and condition flags `c`. Some trades/conditions are excluded from this endpoint.
+- Latest IEX quote: `GET https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest?feed=iex`; response has `symbol` and `quote` (or multi-symbol `quotes`) with `bp`/`ap` (bid/ask prices), sizes/exchange codes, condition `c`, and timestamp `t`; price zero denotes no active bid/ask.
+- Historical bars: `GET https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Day&start=YYYY-MM-DD&end=YYYY-MM-DD&limit=...&feed=iex&adjustment=raw`; response has `bars[]` with `t`, `o`, `h`, `l`, `c`, `v`, optional `n`/`vw`, and `next_page_token`. Check and follow pagination; `limit` is across the response, not per symbol. Adjustment options include `raw`, `split`, `dividend`, and `all`.
+- HTTP rate headers include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`; handle authentication/permission errors (401/403), bad requests (400), and throttling (429) explicitly.
+
+**Free limits and coverage:** the official Basic plan is $0, covers US stocks and ETFs, has real-time IEX (one exchange) as its equity feed, 30 websocket symbols, historical data back to 2016, and 200 historical API calls/minute. IEX is approximately 2.5% of US market volume: it is not NBBO or consolidated volume, and its quote/trade/bar records can be sparse for a thinly traded security. Critically, the official FAQ says OTC market data requires a special subscription currently available only to broker partners. Thus the Basic retail API does **not** cover OTC microcaps. It must never be represented as a comprehensive microcap universe or as consolidated live US pricing. Treat missing IEX records as unavailable, not a zero price or a reason to silently substitute another paid feed. The Basic plan table also specifies a latest-15-minute historical-data limitation; verify the exact applicability of that limit to the requested IEX endpoint and range in the authenticated account before using older histories for evaluation.
+
+**Data rights / remaining verification:** the current public pages above document endpoint access, schema, plan price and limits, but do not establish this application's rights to persist, redisplay or send raw market data to OpenAI. Review and accept the actual market-data agreement shown in the account, confirm the account's credentials/plan and permitted storage/AI processing, and do not enable calls until these are clear. No API credentials were available for a live request in this phase.
+
+**Free test procedure (after credential and terms verification):** issue a single IEX latest-trade and latest-quote request for one supported listed ticker; inspect timestamps, IEX exchange code, bid/ask and 401/403/429 behavior. Then request a narrow one-day historical range and validate OHLCV, adjustment, pagination and rate-limit headers. Test a known eligible low-priced listed symbol separately; do not use an OTC ticker as proof of expected access because Alpaca documents OTC as unavailable on the retail Basic plan. Never send an order.
+
+**Local adapter implemented in Phase 2:** `backend/bin/market_data_server.dart` binds only to `127.0.0.1`; credentials are read only from server-process environment variables `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`. Calls also require `ALPACA_MARKET_DATA_TERMS_CONFIRMED=true`; optional short-lived memory caching stays off unless `ALPACA_DATA_CACHING_PERMITTED=true`. The service has no paid-provider fallback, forces `feed=iex`, limits its own requests to 180/minute, deduplicates concurrent requests, and forwards upstream rate-limit headers. `A_TRADER_ALLOWED_ORIGIN` must exactly match the browser app's origin for browser access; without it, browser-origin requests are denied. Read-only routes are `GET /health`, `GET /api/v1/market-data/quote?symbol=AAPL`, and `GET /api/v1/market-data/bars?symbol=AAPL&start=2026-10-01&end=2026-10-10&adjustment=raw`. HTTP credentials never come from the Flutter client. The adapter is not wired into the mock dashboard and has not made a real provider request.
+
+**Fallback:** request/verify Schwab Individual Trader API market-data access first because the user already has a Schwab account. Its authenticated portal is inaccessible without the user's own login; eligibility, app approval, quotas, entitlements and data rights remain unverified. If Schwab is unavailable and the security is not covered by Alpaca Basic IEX, keep that symbol's market data unavailable and do not produce a price-dependent recommendation.
+
+## Alpha Vantage — EOD-only free fallback
+
+**Official docs/key:** [API documentation](https://www.alphavantage.co/documentation/), [API key request](https://www.alphavantage.co/support/#api-key), [real-time market data policy](https://www.alphavantage.co/realtime_data_policy/). Register for an API key; include it as `apikey` in query parameters. Use a backend/local service, not a public browser client.
+
+**Relevant endpoints and fields:** `GET https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=IBM&apikey=...` returns `Meta Data` and `Time Series (Daily)` records keyed by date with `"1. open"`, `"2. high"`, `"3. low"`, `"4. close"`, `"5. volume"`. `function=GLOBAL_QUOTE` returns `Global Quote` fields such as symbol, latest price, latest trading day, previous close and volume. Always parse provider messages/errors and distinguish daily EOD from a live quote. Standard daily output can be compact/full, depending on current endpoint docs.
+
+**Free limits/access:** official standard free allowance is limited (currently 25 requests/day advertised in Alpha Vantage support materials); read the live key/dashboard and endpoint's designation on signup. The documentation explicitly labels `TIME_SERIES_INTRADAY` as **Premium**, even though it documents 1/5/15/30/60 minute intervals, 25+ years, extended hours, `month`, `outputsize` and an entitlement switch. Realtime/delayed US quotes and intraday history are exchange-regulated and shown as premium; do not call them on free. Free daily historical bars are end-of-day, not current quotes. History is documented globally; do not infer microcap/OTC venue completeness from global coverage.
+
+**Response/test:** the official docs provide a demo URL such as `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=IBM&apikey=demo` (demo is not a usable general key). Replace with the personal key only in a private backend test; inspect HTTP status, `"Time Series (Daily)"`, date and OHLCV fields, and explicit quota messages. No card/paid entitlement is assumed, but verify the signup workflow and terms at implementation time.
+
+**Storage/AI rights:** public API documentation alone does not establish redistribution, retention, display or forwarding-to-GPT rights. Keep outputs private, retain minimal derived values, and confirm provider terms before storing/redisplaying raw data or sharing with a model.
+
+**Fallback:** Alpaca IEX (different source and limited exchange scope) or no price-based recommendation when daily data is insufficient.
+
+## Massive (formerly Polygon.io) — candidate only
+
+**Official docs:** [custom bars endpoint](https://www.massive.com/docs/rest/stocks/aggregates/custom-bars), [pricing](https://www.massive.com/pricing). The documented request is `GET /v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/{from}/{to}` with optional `adjusted`, `sort`, `limit`; response includes `ticker`, `adjusted`, `resultsCount`, `results` (`o/h/l/c/v/vw/t`, optional `n/otc`), `status`, and optional `next_url`.
+
+**Access/limits:** API key required by the platform. The endpoint docs state it is included across Stocks plans, but recency differs by plan: Stocks Basic is end-of-day, Stocks Starter/Developer 15-minute delayed, Advanced real-time; Basic history dates back two years per plan table. The official pricing page renders current terms dynamically and did not expose an exact Basic request quota in this review. Obtain current quota, signup/card requirements, fee if any, exchange/universe scope (especially OTC/microcaps), and terms in the official account before selecting it. No paid plan or trial may be used.
+
+**Test/fallback:** after free-plan eligibility is verified, query a narrow daily range and check `status`, `resultsCount`, `t`, adjusted status and `otc`. Use Alpaca IEX / Alpha Vantage daily bars if appropriate; otherwise disable.
+
+## SEC EDGAR — recommended filings source
+
+**Official docs:** [EDGAR API guide](https://www.sec.gov/edgar/sec-api-documentation), [developer/fair-access resources](https://www.sec.gov/developer), [API host](https://data.sec.gov), [official RSS feed page](https://www.sec.gov/about/rss-feeds), [insider transaction data sets](https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets).
+
+**Access and requests:** public submissions and XBRL APIs require no API key/account. Identify the application and include an honest descriptive `User-Agent` with contact information. Stay below SEC's maximum 10 requests/second per user and lower burst rates where practical; cache/deduplicate, honor HTTP errors, and never rotate clients to evade limits.
+
+**Endpoints/fields:** ticker/CIK map `GET https://www.sec.gov/files/company_tickers.json`; submissions `GET https://data.sec.gov/submissions/CIK##########.json` contains issuer identity and `filings.recent` arrays such as `form`, `filingDate`, `accessionNumber`, `primaryDocument`; company XBRL facts `GET https://data.sec.gov/api/xbrl/companyfacts/CIK##########.json` has namespace/fact/unit/period/value dimensions; filing archive path `https://www.sec.gov/Archives/edgar/data/{cik}/{accession-without-hyphens}/{primaryDocument}`. Filter submissions on form 4 to discover Form 4 XML and parse transaction data only from filed source documents. Responses are JSON, except archive documents/feeds.
+
+**Freshness/coverage/limits:** filings are available after filing acceptance/publication, not before; submissions API and facts cover SEC filers, not every OTC issuer/non-filer. CompanyFacts exposes standardized XBRL facts, not a complete normalized fundamentals set for each microcap. Fair access is the known cap; no paid tier/API key. SEC's public API materials do not impose an API fee. Use linked source documents to verify reporting period, filing acceptance time, amendment and source context.
+
+**Test:** GET company tickers, choose a CIK, then request submissions JSON and verify latest `accessionNumber`/`primaryDocument`; request CompanyFacts with a descriptive User-Agent and compare a known fact's `val`, `fy`, `fp`, `form`, and `filed`. Do not run a high-volume bulk test. SEC's bulk ZIP data sets are alternatives for offline historical testing.
+
+**Restrictions:** follow SEC access and website terms; store source links and retrieval timestamps. Do not assert that all SEC data may be permanently republished or freely sent to GPT without reviewing the current website/data terms and third-party data embedded in a filing.
+
+## Finnhub — not selected pending verification
+
+**Official sources:** [API docs](https://finnhub.io/docs/api), [rate limits](https://finnhub.io/docs/api/rate-limit), [plans](https://finnhub.io/pricing).
+
+The interactive official documentation lists endpoints including quote `GET /api/v1/quote?symbol=...`, candle `GET /api/v1/stock/candle?symbol=...&resolution=...&from=...&to=...`, company news `GET /api/v1/company-news?symbol=...&from=...&to=...`, and market news `GET /api/v1/news?category=...`; responses are endpoint-specific, with candle arrays commonly keyed `c,h,l,o,s,t,v`, and quote fields for current/previous/low/high/change. API token authentication is required, normally the `token` query parameter. Do not expose it to Flutter Web.
+
+An official general cap page describes 429 on excess and a 30-calls/second ceiling, but public interactive docs did not expose exact free-minute/day quotas or endpoint plan entitlements, small-cap/OTC coverage, delay, history or storage/AI rights at review time. Claims found in third-party descriptions of “60 requests/minute”, “real-time”, or free company news were not accepted as verified facts. Before any use, inspect the actual no-cost plan in a new account, terms/data license, market data policy, API headers, quote/candle payload and allowed security universe. If its usable tier requires billing, trial, subscription, or paid entitlement, exclude it.
+
+**Fallback:** SEC + issuer releases for research and EOD-only candidates from Alpha Vantage / IEX-only Alpaca for prices.
+
+## Google Search / Google News
+
+**Custom Search official docs:** [Custom Search JSON API](https://developers.google.com/custom-search/v1/overview). Requires a Programmable Search Engine ID (`cx`) and API key; REST endpoint `GET https://customsearch.googleapis.com/customsearch/v1?q=...&cx=...&key=...`, response includes `items[].title`, `link`, `snippet`, `displayLink`, plus `searchInformation`. Official docs checked say 100 free queries/day for **existing** customers, overage is $5/1,000 with Google billing enabled, new customers cannot enable it, and service discontinuation is 2027-01-01. Because it is unavailable to new customers and overage requires paid billing, do not depend on it.
+
+Google News has no official public news-search API. Google News's [terms of use](https://www.google.com/intl/en_us/terms_google_news.html) permit personal non-commercial use and prohibit using robots/spiders or other processes to monitor/copy its content, plus copying/reformatting/publicly displaying it. Do not automate Google News RSS queries for research ingestion or pass extracted items to GPT. Search only manually in the browser; record URLs/times manually if needed and check publisher terms.
+
+**Free fallback:** EDGAR filings, company investor-relations disclosures/RSS where provided under their own terms, and manually opened publisher sources. Do not replace with third-party paid SERP APIs.
+
+## Bright Data Social Media Scraper API — single optional X/Reddit service
+
+**Official sources**
+
+- [Social Media Scraper product](https://brightdata.com/products/web-scraper/social-media-scrape)
+- [Bright Data free tier terms and quota](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier)
+- [Social media scraper API overview](https://docs.brightdata.com/api-reference/scrapers/social-media-apis/overview)
+- [Reddit scraper product/docs](https://docs.brightdata.com/products/scrapers/reddit/introduction)
+- [Reddit request examples and schemas](https://docs.brightdata.com/products/scrapers/reddit/send-first-request)
+- [X request examples and schemas](https://docs.brightdata.com/products/scrapers/twitter/send-first-request)
+- [Synchronous request API reference](https://docs.brightdata.com/api-reference/scrapers/synchronous-requests)
+- [Scraper API pricing](https://brightdata.com/pricing/web-scraper)
+- [Bright Data legal and governance index](https://brightdata.com/legal-governance), including the [Master Service Agreement](https://brightdata.com/license) and [Acceptable Use Policy](https://brightdata.com/acceptable-use-policy) (recheck applicable versions at signup)
+
+**Free access and cost controls:** Bright Data's official free-tier documentation states eligible new accounts receive 5,000 recurring credits/month, shared across eligible products, with no credit card required. The social scraper product page advertises 5,000 free records/month; the API docs describe pay-per-successful-record. Unused monthly credits do not roll over. The billing docs state accounts with deposited wallet funds can continue at PAYG rates after free credits are consumed; accounts with no deposited funds hard-stop. Therefore use a dedicated account with **no deposited funds**, disable auto-recharge, and enforce a local monthly cap below 5,000 records. Account usage across other eligible products also consumes this shared pool; stop if quota, account eligibility, or balance is uncertain. At exhaustion, treat provider error as unavailable until the monthly renewal. Never fall back to paid usage; recheck changing PAYG prices only as exclusionary context before integration.
+
+**Authentication / one-key setup:** create one Bright Data account and obtain its API token from the account control panel. Send that token using the API bearer-token authorization header, with the secret loaded only by the server-side adapter. Keep this single key server-side (local backend/service), not in Flutter Web, mobile app source, logs, screenshots, or prompts. Select the platform by dataset ID; there is no need for separate X and Reddit API credentials.
+
+The general Master Service Agreement says a valid payment method is required after any free-trial period for continued service. This appears distinct from the currently documented recurring free-credit tier, which says no card is required. Confirm that the account is actually on the no-cost recurring tier and that its current dashboard or contract does not require billing before relying on it; otherwise exclude this provider under the project cost rule. Keep the account unfunded with auto-recharge disabled so exhausted free credits stop rather than transition to paid usage.
+
+**Terms and data-use limits:** the Master Service Agreement governs use of Data Services and bars distributing, transmitting, reproducing, publishing, licensing, transferring, or selling data to offer a similar or competitive product. Keep any permitted use internal and do not redistribute scraped records. Bright Data's Acceptable Use Policy forbids collecting nonpublic information behind login and use that violates third-party rights. These terms do not grant permission under X or Reddit rules: retain the platform-authorization gate below, and do not forward records to OpenAI unless Bright Data's terms and the platform's terms permit that processing.
+
+
+**Request and response**
+
+- Common synchronous endpoint: `POST https://api.brightdata.com/datasets/v3/scrape?dataset_id={DATASET_ID}&format=json`, with `Content-Type: application/json`; a bare array of objects is accepted, e.g. `[{"url":"https://..."}]`. An object body supports `input`, `limit_per_input`, and `custom_output_fields`.
+- Reddit posts dataset ID: `gd_lvz8ah06191smkebj4`; comments dataset ID: `gd_lvzdpsdlw09j6t702`. Post collect input is `{"url":"<public Reddit post URL>"}`. Discovery uses `type=discover_new&discover_by=keyword` with `{"input":[{"keyword":"...","date":"Past week","num_of_posts":20}],"limit_per_input":10}`, or `discover_by=subreddit_url` with a public subreddit URL and `sort_by` (`Hot`, etc.). Reddit post records include `post_id`, `url`, `user_posted`, `title`, `description`, `num_comments`, `date_posted`, `community_name`, `num_upvotes`, and optional media/comment/author fields.
+- X post dataset ID: `gd_lwxkxvnf1cynvib9co`; X profile dataset ID: `gd_lwxmeb2u1cniijd7t4`. The official synchronous guide demonstrates collecting a known post URL in the same common request envelope. Its post fields include `id`, `user_posted`, `name`, `description`, `date_posted`, `url`, `likes`, `replies`, `reposts`, `views`, `hashtags`, and optional profile/media/context fields. No X keyword-search request shape was verified from the linked endpoint quickstart; do not claim or implement it without a current official endpoint doc.
+- `format=json` returns a JSON array; default is NDJSON. HTTP 200 returns records. The synchronous endpoint has a one-minute wait: longer calls return HTTP 202 with `snapshot_id` and `retry-after`; use the documented progress/snapshot endpoints, not a fabricated empty-success result. Bright Data recommends 20 URLs or fewer per synchronous request; discovery is better async and should use `limit_per_input` to bound credits.
+
+**Limits / data quality:** the free allowance is 5,000 shared credits monthly, not unlimited access. Dataset endpoints scrape on demand; Reddit docs call this real-time, but page visibility, scraper workload and target-site changes affect response time/success. It is not a guaranteed archive or point-in-time feed. Preserve the source post URL/ID, original `date_posted`, retrieval time, platform, and endpoint. Data only includes what the platform exposes to the collector; missing/deleted/private posts must remain missing. Apply provider request-level output limits and local credit accounting before submitting calls. There is no documented guarantee that every ticker's posts or full historical social archive is discoverable.
+
+**Critical platform-authorization gate:** Bright Data's API is a third-party scraper, not an official X or Reddit API, and its availability does **not** establish that automated collection, model processing, or storage is authorized by the platform. Reddit's [User Agreement](https://redditinc.com/policies/user-agreement) says collection by automated means is not permitted without written agreement except as expressly permitted; X's [Terms of Service](https://x.com/en/tos) and [Developer Agreement](https://developer.x.com/en/developer-terms/agreement) also govern automated access/collection. The original app requirements prohibit prohibited scraping and access-control bypass. Thus **do not activate calls for either platform unless current platform terms and any required written authorization clearly permit this specific vendor-mediated use**. Do not scrape authenticated/private content, evade login/CAPTCHA/technical controls, or treat proxy/anti-bot handling as authorization. Review Bright Data's current terms, collection method, data retention, user-content rights, redistribution, and OpenAI-processing permissions before implementation. If unclear or prohibited, leave social collection disabled and use SEC/issuer sources instead.
+
+**Test request (only after terms are cleared):** start with one public, known post URL and `limit_per_input: 1` on a dedicated, unfunded account using a server-side secret. Verify status 200 versus 202, parse the JSON/NDJSON row, `id`/`post_id`, `url`, `date_posted`, and content fields, compare source link manually, and check the free-credit counter before and after. Do not test with private content or use platform login credentials. A test must stop if authorization or the free allowance is uncertain.
+
+**Decision:** This is the requested single social-media provider/key design and is a permanent free access option within a hard monthly quota, but integration is conditional on platform and vendor terms. No direct X API or Reddit Data API client will be built. Social output is public chatter, not verified company news or market data; label it accordingly and never turn its engagement metrics into a probability of price movement.
+
+## Reddit Data API (direct) — researched, no connector planned
+
+**Official references:** [Reddit Data API Wiki](https://support.reddithelp.com/hc/en-us/articles/16160319875092-Reddit-Data-API-Wiki), [API docs](https://www.reddit.com/dev/api/), [Developer Terms](https://redditinc.com/policies/developer-terms), [Data API Terms](https://redditinc.com/policies/data-api-terms).
+
+Access is OAuth-based for the Data API, using a registered app/client credentials and an identifying `User-Agent`; read requests use `https://oauth.reddit.com/...`. For example, a subreddit search is `GET /r/{subreddit}/search?q=...&restrict_sr=1&sort=new&limit=...`; typical listing response includes post `id`, `title`, `selftext`, `permalink`, `created_utc`, `score`, `num_comments`, and subreddit. Keep requested fields minimal and link back to the Reddit post.
+
+The API wiki and terms are the controlling sources for current app approval, rate limits, personal/non-commercial status, content use, deletion and retention. The official help page was access-denied to the research fetcher; numeric 100-QPM claims seen in secondary sources are therefore **not** treated as verified. Obtain in-product/app-specific limit headers and terms approval before polling. Deleted user content must be removed in line with current Reddit rules; cache only when terms permit. This application is private/non-commercial, but that fact alone does not prove API access or AI-processing permission for a small group of users.
+
+Direct OAuth Data API integration is not planned because the user requested one external service/key rather than native X/Reddit connectors. Reddit's [User Agreement](https://redditinc.com/policies/user-agreement) states automated data collection/scraping is prohibited absent permission unless expressly permitted; the official [Data API Terms](https://redditinc.com/policies/data-api-terms) govern authorized direct API access. Bright Data does not waive these platform terms. Use its single-provider integration only if written/platform authorization is clear; otherwise no automated Reddit source.
+
+## X API v2 (direct) — researched, no connector planned
+
+**Official sources:** [About X API](https://docs.x.com/x-api/getting-started/about-x-api), [pay-per-usage pricing](https://docs.x.com/x-api/getting-started/pricing), [access guide](https://docs.x.com/x-api/getting-started/getting-access).
+
+X API v2 requires a developer console account/app and credentials; bearer/OAuth authentication depends on endpoint. For a post lookup the official docs show `GET https://api.x.com/2/tweets/{id}` with bearer authorization and fields/expansions; search endpoints are documented separately. The official pricing page currently charges $0.005 per post resource read (user reads $0.010), uses purchased credits, has a 3-million-post-read monthly cap, and has no free tier (first-card credits/credits tied to purchase are promotions, not permanent free access). Terms and current endpoint restrictions apply.
+
+**Decision/fallback:** no direct X connector. API reads are paid and excluded. The Bright Data third-party scraping option is a separate conditional provider and is not an authorization workaround: current X Terms/Developer Agreement must permit that collection, otherwise keep it disabled. Manual browser research is optional and is not machine-ingested.
+
+## News source fallback
+
+No general financial-news API with verified, permanent, free access plus explicitly permitted storage and model processing was selected in this review. Alpha Vantage's news sentiment and many other fundamentals/news endpoints are not assumed free. Use SEC/company disclosures and publisher pages manually until a source's official free quotas and redistribution/AI-processing terms are checked. RSS/feed access is source-specific; an RSS endpoint is not blanket permission to copy article contents. Store source metadata/link and minimal permitted facts rather than full article text.
+
+## OpenAI (the only planned paid API)
+
+**Official docs:** [API pricing](https://developers.openai.com/api/docs/pricing), [Responses API](https://developers.openai.com/api/docs/guides/text), [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs), [data controls](https://developers.openai.com/api/docs/guides/your-data), [API key safety](https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety).
+
+Send a bearer-token authorization header, retrieving the API key from server-side secret configuration, and use HTTPS `POST https://api.openai.com/v1/responses`; select a model available to the API account, pass a versioned system prompt and compact verified inputs, and request `text.format` with strict JSON Schema for a user-facing recommendation object. Responses include output items/text and usage counts (input/output token usage; exact output fields depend on API version/model). Validate structured output and independently enforce all numeric/risk invariants. Never expose the API key to Flutter Web, and never forward market-data credentials.
+
+This is metered and can incur charges. The live model/token prices change, so query the official pricing page when enabling it; Phase 1 has no OpenAI call. Configure project budgets/rate limits and local per-action call/token ceilings. Store request model, prompt version, redacted input digest, response, input/output token counts and a cost estimate. API inputs/outputs are not used to train models by default; the official data-control page says abuse-monitoring logs may be retained for up to 30 days unless an approved retention control applies. ZDR requires prior approval and is not assumed.
+
+## Research limitations and ranking conclusion
+
+Several provider pages are interactive, gated, or dynamic; these facts are explicitly left unresolved rather than inferred from unofficial tutorials. Re-check plan dashboards and terms immediately before implementation. Recommended order: (1) SEC EDGAR/issuer primary sources for research, (2) request/verify Schwab Individual access and entitlements, (3) Alpaca IEX if single-venue data meets the use case, (4) Alpha Vantage daily EOD as low-rate fallback, (5) Bright Data as one optional social provider only after platform authorization. A reliable free consolidated real-time quote feed for all US microcaps was **not** verified. Where coverage/freshness is inadequate, emit no price-dependent trade proposal.
