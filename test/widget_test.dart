@@ -6,7 +6,18 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:a_trade/main.dart';
+import 'package:a_trade/market_data/local_market_data_service.dart';
 import 'package:a_trade/providers/provider_health.dart';
+
+import 'market_data_fixtures.dart';
+
+LocalMarketDataService _marketService() => LocalMarketDataService(
+  client: MockClient(
+    (request) async => fixtureResponse(
+      quoteFixture(symbol: request.url.queryParameters['symbol']!),
+    ),
+  ),
+);
 
 Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
   await tester.scrollUntilVisible(
@@ -37,77 +48,66 @@ Future<void> _scrollToTop(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('dashboard clearly labels all recommendations as mock', (
-    tester,
-  ) async {
-    await tester.pumpWidget(const MyApp());
+  testWidgets(
+    'dashboard automatically loads ten real quote cards without mocks',
+    (tester) async {
+      await tester.pumpWidget(MyApp(marketDataService: _marketService()));
+      await tester.pumpAndSettle();
 
-    expect(find.text('A-Trader'), findsOneWidget);
-    expect(find.text('Private swing-trading research'), findsNothing);
-    expect(
-      find.text('MOCK DATA — NOT LIVE MARKET INFORMATION'),
-      findsOneWidget,
-    );
-    expect(find.textContaining('NOVA'), findsOneWidget);
-    expect(find.textContaining('MOCK'), findsWidgets);
-    expect(find.text('Ask GPT Why (mock)'), findsNWidgets(3));
-    expect(
-      tester
-          .widget<MaterialApp>(find.byType(MaterialApp))
-          .theme!
-          .scaffoldBackgroundColor,
-      const Color(0xFFF5FAFF),
-    );
-  });
+      expect(find.text('A-Trader'), findsOneWidget);
+      expect(find.text('Private swing-trading research'), findsNothing);
+      expect(
+        find.text('MOCK DATA — NOT LIVE MARKET INFORMATION'),
+        findsNothing,
+      );
+      expect(find.text('SOFI'), findsOneWidget);
+      expect(find.byType(Card), findsNWidgets(10));
+      expect(find.textContaining('MOCK'), findsNothing);
+      expect(find.text('Market data'), findsNothing);
+      expect(find.text('Ask GPT Why (mock)'), findsNothing);
+      expect(
+        tester
+            .widget<MaterialApp>(find.byType(MaterialApp))
+            .theme!
+            .scaffoldBackgroundColor,
+        const Color(0xFFF5FAFF),
+      );
+    },
+  );
 
-  testWidgets('recommendation details expand to supporting evidence', (
-    tester,
-  ) async {
-    await tester.pumpWidget(const MyApp());
-
-    await _scrollTo(tester, find.byKey(const Key('details_NOVA')));
-    await tester.tap(find.byKey(const Key('details_NOVA')));
+  testWidgets('stock details expand to provider coverage', (tester) async {
+    await tester.pumpWidget(MyApp(marketDataService: _marketService()));
     await tester.pumpAndSettle();
 
-    expect(find.text('Supporting evidence'), findsOneWidget);
-    expect(find.textContaining('fictional company release'), findsOneWidget);
-    expect(find.text('Indicators'), findsOneWidget);
-    expect(find.text('Risks'), findsOneWidget);
+    await _scrollTo(tester, find.byKey(const Key('details_SOFI')));
+    await tester.tap(find.byKey(const Key('details_SOFI')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('IEX is single-exchange'), findsOneWidget);
+    expect(find.textContaining('Retrieved (UTC)'), findsOneWidget);
   });
 
   testWidgets('ideas can be saved and reviewed in the saved section', (
     tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(marketDataService: _marketService()));
+    await tester.pumpAndSettle();
 
-    await _scrollTo(tester, find.byKey(const Key('save_NOVA')));
-    await tester.tap(find.byKey(const Key('save_NOVA')));
+    await _scrollTo(tester, find.byKey(const Key('save_SOFI')));
+    await tester.tap(find.byKey(const Key('save_SOFI')));
     await tester.pumpAndSettle();
     await _scrollToTop(tester);
     await tester.tap(find.textContaining('Saved (1)'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('NOVA'), findsOneWidget);
-    expect(find.textContaining('KITE'), findsNothing);
-  });
-
-  testWidgets('Ask GPT Why returns a clearly identified mock explanation', (
-    tester,
-  ) async {
-    await tester.pumpWidget(const MyApp());
-
-    await _scrollTo(tester, find.byKey(const Key('why_NOVA')));
-    await tester.tap(find.byKey(const Key('why_NOVA')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('NOVA: mock explanation'), findsOneWidget);
-    expect(find.textContaining('No GPT request was made'), findsOneWidget);
+    expect(find.text('SOFI'), findsOneWidget);
+    expect(find.text('RKLB'), findsNothing);
   });
 
   testWidgets(
     'settings expose risk controls, prompt preview, theme and providers',
     (tester) async {
-      await tester.pumpWidget(const MyApp());
+      await tester.pumpWidget(MyApp(marketDataService: _marketService()));
 
       await tester.tap(find.byKey(const Key('settings_button')));
       await tester.pumpAndSettle();
@@ -129,6 +129,8 @@ void main() {
         find.byKey(const Key('check_provider_connections')),
         findsOneWidget,
       );
+      await _scrollSettingsTo(tester, find.text('Twelve Data market research'));
+      expect(find.textContaining('TWELVE_DATA_API_KEY'), findsOneWidget);
       await _scrollSettingsTo(tester, find.text('Schwab Trader API'));
       expect(find.text('Schwab Trader API'), findsOneWidget);
       await _scrollSettingsTo(tester, find.text('Alpaca IEX market data'));
@@ -156,6 +158,12 @@ void main() {
         return httpResponse({
           'status': 'ok',
           'providers': {
+            'twelveData': {
+              'credentialsPresent': true,
+              'enabled': true,
+              'integrationImplemented': true,
+              'termsConfirmed': true,
+            },
             'alpaca': {
               'credentialsPresent': false,
               'enabled': false,
@@ -192,7 +200,12 @@ void main() {
         });
       }),
     );
-    await tester.pumpWidget(MyApp(providerHealthService: service));
+    await tester.pumpWidget(
+      MyApp(
+        providerHealthService: service,
+        marketDataService: _marketService(),
+      ),
+    );
 
     await tester.tap(find.byKey(const Key('settings_button')));
     await tester.pumpAndSettle();
@@ -203,6 +216,13 @@ void main() {
     await tester.tap(find.byKey(const Key('check_provider_connections')));
     await tester.pumpAndSettle();
 
+    await _scrollSettingsTo(tester, find.text('Twelve Data market research'));
+    expect(
+      find.textContaining(
+        'Configured for research/testing; provider not tested',
+      ),
+      findsOneWidget,
+    );
     await _scrollSettingsTo(tester, find.text('Schwab Trader API'));
     expect(
       find.textContaining('Credentials detected · Approval / adapter pending'),
@@ -223,7 +243,7 @@ void main() {
   testWidgets('theme selection is applied after saving settings', (
     tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(marketDataService: _marketService()));
 
     await tester.tap(find.byKey(const Key('settings_button')));
     await tester.pumpAndSettle();
@@ -238,10 +258,59 @@ void main() {
     );
   });
 
-  testWidgets('editing the prompt updates the assembled mock request preview', (
+  for (final termsConfirmed in [false, true]) {
+    testWidgets(
+      'Twelve Data inactive status distinguishes terms ($termsConfirmed)',
+      (tester) async {
+        final service = ProviderHealthService(
+          client: MockClient(
+            (_) async => httpResponse({
+              'status': 'ok',
+              'providers': {
+                'twelveData': {
+                  'credentialsPresent': true,
+                  'enabled': false,
+                  'integrationImplemented': true,
+                  'termsConfirmed': termsConfirmed,
+                },
+              },
+            }),
+          ),
+        );
+        await tester.pumpWidget(
+          MyApp(
+            providerHealthService: service,
+            marketDataService: _marketService(),
+          ),
+        );
+        await tester.tap(find.byKey(const Key('settings_button')));
+        await tester.pumpAndSettle();
+        await _scrollSettingsTo(
+          tester,
+          find.byKey(const Key('check_provider_connections')),
+        );
+        await tester.tap(find.byKey(const Key('check_provider_connections')));
+        await tester.pumpAndSettle();
+        await _scrollSettingsTo(
+          tester,
+          find.text('Twelve Data market research'),
+        );
+        expect(
+          find.textContaining(
+            termsConfirmed
+                ? 'not selected as active provider'
+                : 'Research terms confirmation required',
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+  }
+
+  testWidgets('editing the prompt updates the draft request preview', (
     tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(marketDataService: _marketService()));
 
     await tester.tap(find.byKey(const Key('settings_button')));
     await tester.pumpAndSettle();
@@ -262,22 +331,17 @@ void main() {
     );
   });
 
-  testWidgets(
-    'history view shows mock outcomes and does not claim verified results',
-    (tester) async {
-      await tester.pumpWidget(const MyApp());
+  testWidgets('history view is empty without fabricated outcomes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(MyApp(marketDataService: _marketService()));
 
-      await tester.tap(find.text('History'));
-      await tester.pumpAndSettle();
+    await tester.tap(find.text('History'));
+    await tester.pumpAndSettle();
 
-      expect(find.text('Historical results'), findsOneWidget);
-      expect(
-        find.textContaining('not tracked or verified outcomes'),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Unfilled'), findsOneWidget);
-    },
-  );
+    expect(find.textContaining('No historical results yet'), findsOneWidget);
+    expect(find.textContaining('hypothetical +4.2%'), findsNothing);
+  });
 }
 
 http.Response httpResponse(Map<String, Object?> body) =>

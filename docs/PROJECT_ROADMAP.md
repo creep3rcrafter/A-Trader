@@ -19,6 +19,58 @@ Phase 1 keeps the application Flutter-only and dependency-free: responsive Mater
 
 ## Milestones and acceptance criteria
 
+### Current incremental scope and next phase (2026-10-12)
+
+The current working tree already contains the Flutter watchlist, Ask AI, Dart server, provider adapters and the frontend research action/contract. Before this increment the backend research route, native tool dispatcher and SEC metadata adapter were missing. Historical phase checkmarks below are not evidence that today's live credentials, provider rights, tool calling or trading performance work.
+
+This increment completes only bounded local research wiring and tests. Opportunity scoring, computed trade plans, durable evidence/history, permitted news/social ingestion, dynamic discovery, paper outcomes and backtesting remain unimplemented. No live quote/SEC authorization is inferred from synthetic tests, and no win-rate claim is supported.
+
+**Verified outcome:** 94 targeted and 190 full regression tests passed; the opt-in real `google/gemma-4-e4b` cycle independently completed two model calls/one validated synthetic quote tool, received its linked result and returned the exact fixture price. Formatting, Flutter/backend analysis, IDE build and same-origin Flutter Web compilation passed. Live provider authentication/rights and live SEC access remain unverified.
+
+### Deterministic daily-indicator engine: first slice and remaining design
+
+Implement a pure Dart service over the existing `MarketBar` model; reuse `dailyBars` rather than add APIs/dependencies. Start with a typed input validator and session counts, returns, SMA and relative volume; then add the remaining formulas below in independently tested slices. Do not combine this work with scoring, trade plans, discovery or AI-generated numbers.
+
+**Current slice scope:** a reusable calculation layer for validated completed daily bars, session counts/ratios, close returns, SMA and relative volume. It does not change the existing quote/research endpoints or automatically fetch extra bars, invoke AI, expose new UI recommendations or spend provider quota. Caller-supplied expected session dates and an explicit last-completed-session cutoff are required to establish complete calculation windows; no holiday calendar or timezone library is added. Without established coverage, metric results must remain explicitly unavailable rather than calculate over an implicitly compressed session history.
+
+**Implemented first-slice API:** `DailyIndicatorEngine.calculate(config: DailyIndicatorConfig(...), bars: List<MarketBar>)` returns immutable, typed metrics with serializable formula/unit/window/source metadata. The validator rejects malformed/mixed series; metrics distinguish insufficient, stale, incomplete and unverified data. Session windows use supplied expected dates rather than assuming weekday calendars.
+
+**First-slice validation:** 28 focused indicator tests and all 218 regression tests passed; formatting, Flutter/backend analysis, IDE validation and existing same-origin Web compilation passed. The local native-model smoke test is intentionally opt-in/skipped here because this pure calculation increment makes no model calls. API/UI integration and remaining formulas are still unchecked, not implied by these results.
+
+Raw-price comparability requires an explicit caller confirmation; neither a raw feed nor an adjustment label alone verifies corporate-action history. Adjusted close returns remain arithmetic series returns, not verified investable total returns. Partial-feed relative volume compares that same feed's returned volumes, not market-wide volume or executable liquidity.
+
+**Current follow-on scope:** extend this foundation with SMA slope/trend, EMA and RSI using the declared initialization conventions and golden vectors. Expose the same deterministic results through an explicit card action and the bounded local research tool, with source/coverage/freshness metadata and typed unavailable values. Model interpretations must not replace code-computed values. Keep MACD, ATR, realized volatility, dollar-volume/liquidity thresholds, scoring and trade plans for later independently testable increments.
+
+**Calculation conventions implemented in the follow-on:** `daily-indicators-v2`, default trend lag one session and RSI period 14. EMA and RSI retain the full expected history's seed/warmup metadata; missing/stale input anywhere in that recursive history makes them unavailable. SMA trend uses the required N+K trailing expected sessions. Raw arithmetic summaries remain labelled as potentially distorted by unverified corporate actions, while raw economic-return interpretation is still gated.
+
+**Follow-on verified:** explicit quote-card action and symbol-only `get_technical_indicators` share the bounded deterministic backend service. All 274 regressions, Flutter/backend analysis, formatting, IDE validation and same-origin Web/Wasm dry run passed. Both real native LM Studio quote and indicator tool cycles passed separately using synthetic fixtures; no live market/SEC or OpenAI calls. History is bounded to 120 calendar days/records, with a conservative independent US-equity calendar for 2025–2030; unsupported years and missing sessions are explicit. Live access/rights remain unverified.
+
+**Next small increment:** add deterministic MACD (SMA-seeded EMA 12/26, signal EMA 9 and histogram) with declared seed/history/insufficient-data rules, independent golden vectors and the same card/tool contract. Keep ATR/volatility and dollar-volume/liquidity for subsequent slices; do not introduce scoring, plans or performance claims.
+
+**Input contract:** one symbol/provider/feed; positive finite consistent OHLC, nonnegative integer volume; strictly increasing unique completed exchange-session dates; consistent known adjustment and timezone/timestamp semantics. Require an explicit analysis cutoff, requested trading-session lookbacks, freshness limit and coverage expectation. Reject mixed raw/adjusted series and future/unfinished sessions. Preserve source/retrieval times, actual count, date range, provider coverage and formula/version/parameters with every result. Do not treat sparse IEX or unverified partial volume as consolidated volume.
+
+**Availability contract:** each metric is a typed value or unavailable with a specific reason and required/observed counts. Invalid input fails validation explicitly; insufficient samples, zero denominators, stale/incomplete coverage or unsupported volume semantics must not become zero, infinity or an invented neutral signal. Do not forward-fill missing bars or assume weekends/holidays are missing sessions without an explicit exchange calendar. No calendar dependency is required in the first slice: callers supply expected completed session dates, or coverage remains explicitly unverified.
+
+| Metric | Formula / convention | Minimum completed sessions |
+|---|---|---|
+| Session colors | Green if `close > open`, red if `close < open`, flat otherwise, over last `N` sessions; green/red fractions divide by all `N`, flats reported separately; green:red is undefined when red is zero | `N` |
+| Lookback return | `close[t] / close[t-N] - 1`; fractional units, not percent; retain adjustment identity | `N+1` |
+| Relative volume | `volume[t] / mean(volume[t-N .. t-1])`; exclude latest session from baseline; zero mean unavailable; partial-volume limitation preserved | `N+1` |
+| SMA / trend | Arithmetic mean of last `N` closes; normalized slope `(SMA[t] / SMA[t-K]) - 1`; positive/negative/zero = rising/falling/flat; no inferred probability | `N` for SMA, `N+K` for slope |
+| EMA | Seed with first `N`-close SMA; subsequent `EMA[t] = alpha*close[t] + (1-alpha)*EMA[t-1]`, `alpha=2/(N+1)` | `N`; disclose initialization/warmup |
+| RSI (default 14) | Wilder means of positive/negative close deltas, seed with first 14 deltas; recurse `(previous*13 + delta)/14`; `100 - 100/(1+avgGain/avgLoss)`; zero loss and positive gain = 100, zero gain and positive loss = 0, both zero = 50 (explicit convention) | 15; seed instability disclosed |
+| MACD (12,26,9) | EMA12 minus EMA26 using the seed above; signal EMA9 of available MACD values; histogram = MACD minus signal | 26 for MACD, 34 for signal/histogram |
+| ATR (default 14) | `TR = max(high-low, abs(high-prevClose), abs(low-prevClose))`; first bar has no previous close and is excluded; initial 14-TR mean then Wilder smoothing; ATR percent = ATR/latest close | 15 |
+| Realized volatility | Sample standard deviation (`N-1` divisor) of last `N` log close returns; annualized by `sqrt(252)` only when explicitly requested for daily sessions; report base and annualization assumption | `N+1`, `N>=2` |
+| Dollar volume / liquidity | Daily proxy `close*volume`; trailing arithmetic mean over `N`; optional caller-defined minimum threshold comparison outside AI; not actual traded notional or executable depth | `N`; volume scope required |
+| Freshness / coverage | Last completed-session date versus explicit cutoff/expected session set; source retrieval age versus caller limit; enumerate missing/duplicate dates and actual/expected coverage ratio | Explicit cutoff/expectations; otherwise unverified |
+
+**Tests:** hand-calculated small arrays; flat/up/down series; RSI zero-gain/loss conventions; EMA/Wilder seed checkpoints; independently calculated MACD/ATR/log-volatility golden vectors; previous-close gaps; zero volume; `N-1/N/N+1` boundaries; duplicate/out-of-order dates; missing sessions; mixed symbols/providers/adjustments; non-finite/invalid OHLC; incomplete/future/stale bars; exchange-date versus UTC behavior; partial-volume limitations; deterministic repeatability and prefix invariance (future bars cannot change earlier outputs).
+
+**Accept when:** no model/provider dependency in the calculation layer; all formulas and fractional/price units are versioned and match golden fixtures within declared floating-point tolerance (e.g. `1e-10` absolute/relative for unit fixtures); every unavailable value explains why; all inputs/coverage provenance remain visible; no invented fills/signals/win rates; existing research/Ask AI/market routes regress cleanly. Raw bars crossing an unverified split cannot be treated as an economic return; adjusted analysis requires known comparable adjustment metadata from the existing adapter.
+
+**Subsequent planning-only sequence:** explainable deterministic scoring (including no suitable trades), hypothetical sizing/entries/stops/targets, persistent evidence/history, permitted news/SEC/public-social research, dynamic candidates, conservative paper outcomes, historical/walk-forward validation, and only then weight optimization on development data with held-out out-of-sample reporting. Do not use model confidence as measured success.
+
 ### Phase 0 — Audit and provider research
 
 Deliver five maintained documents: this roadmap, implementation checklist, provider research, architecture, and performance metric definitions.
@@ -32,6 +84,14 @@ Implement a dashboard of clearly labelled synthetic stock ideas; top-right setti
 **Accept when:** mobile/narrow and desktop/wide layouts remain usable; theme changes apply immediately; save/favorite/settings/prompt interactions work; mock data cannot be mistaken for live data; tests cover the primary interactions; no network requests, order placement, or persistence are present.
 
 ### Phase 2 — Free market-data layer
+
+**Tool-first research change:** The user has deferred Bright Data/SearXNG selection and requested an initial LM Studio tool-use experiment. Add only bounded read-only market-data and recent SEC-metadata tools first, showing actual executed tools, sources and missing capabilities. Broad stock discovery, article/social ingestion, factor-based ranking and validated trade-price calculations remain incomplete; no model claim substitutes for those features.
+
+**2026-10-12 local deployment increment:** Add user-bound encrypted server configuration, password-protected trusted-LAN hosting on port 3000, and explicit Ask AI quote explanations using LM Studio when no OpenAI key is configured. Shared-display and model-processing permissions remain separate default-deny gates. This does not complete screening, durable prompt/recommendation journaling, accuracy measurement or secure Internet deployment. LM Studio model listing was reachable; generation and cross-device access still require user configuration and verification.
+
+**2026-10-11 update:** Alpaca IEX is the selected default; Twelve Data Basic remains explicitly selectable for local personal market research/testing. Quotes and daily bars use server-side adapters once credentials and terms are configured; no API key is sent from Flutter. Twelve Data Basic's non-display restriction prevents assuming permission for a shared production dashboard. Enforce free quotas, exclude OTC/paid feeds, and obtain free display/retention/GPT permissions before those later features. Provider errors never trigger an automatic switch.
+
+**Temporary live Ideas UI:** At the user's request, mock ideas/outcomes and the manual Market data section were removed. Ideas automatically loads ten unscreened watchlist quotes through the saved loopback service URL, with source/feed identity, timestamps, freshness, partial-feed coverage and explicit errors. Saved filters those stocks in memory; History has no fabricated results. Refresh is explicit, Twelve Data calls are paced, and quota/configuration failures stop the run. No screening, trade-plan generation or GPT forwarding occurs. Web launch is fixed at `localhost:3000`, with the backend on `127.0.0.1:8765`. Fixture/widget validation and compilation do not establish account data-use rights.
 
 Add a provider-independent market-data model and repository. The current Phase 2 foundation defines and tests normalized quote/bar contracts, Alpaca response mapping, and a loopback-only Alpaca IEX adapter. Settings can query the local service's `/health` route for server-side credential-presence flags; this is configuration visibility only, not third-party connectivity or entitlement verification. First verify the user's individual Schwab Trader API eligibility and market-data entitlements in the authenticated portal. Alpaca Basic IEX is only a constrained candidate: it is one exchange, omits OTC data for individual accounts, and is not consolidated. Record venue/coverage, delay, stale/missing data, splits, quote limitations, rate limits, and permitted storage/display before enabling any network adapter.
 

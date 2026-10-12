@@ -27,6 +27,14 @@ Use `[x]` only after implementation and verification. Revisit provider facts and
 
 ## Phase 2 — Market data
 
+- [x] Replace Phase 1 mock ideas, sample outcomes and manual research UI with ten temporary unscreened live-quote cards in Ideas, session-only Saved, empty History, explicit freshness/coverage/errors and quota-aware automatic loading.
+- [x] Pin Flutter Web to `localhost:3000` and backend launcher CORS to that origin, retaining backend port `8765`.
+- [x] Verify the replacement with clean analysis, all 92 current tests, IDE build and web compilation; cover loading, refresh, saved/navigation retention, request pacing, failures and stale responses.
+- [ ] Verify live population after restarting the credential-configured backend: the running service's 2026-10-11 smoke check reported Alpaca credentials/terms absent (quotes HTTP 503) and rejected `http://localhost:3000` (HTTP 403). UI fixture checks are complete, but current live prices remain blocked.
+
+- [x] Implement and verify Twelve Data Basic quote/daily-bar normalization, server-only header authentication, durable free quota caps, safe failures and Settings readiness. Full suite: 37 tests passed; Flutter/backend analysis, IDE build, web build and credential-free checks for both provider selections passed.
+- [ ] Verify Twelve Data account credentials with an authorized personal research/test request; do not interpret health presence as authentication.
+- [ ] Resolve Twelve Data Basic display/sharing, retention and GPT-forwarding rights before any production/shared dashboard or model use; no paid licensing fallback.
 - [x] Define provider-neutral quote/bar contracts with source/retrieval timestamps, provider/feed identity, adjustment metadata, and freshness states.
 - [x] Normalize and validate official Alpaca IEX latest-trade, latest-quote, and historical daily-bar payload shapes with fixture-based unit tests.
 - [x] Verify and document Alpaca Basic plan price, official REST quota, IEX coverage/freshness, response fields, and individual-account OTC exclusion.
@@ -36,12 +44,30 @@ Use `[x]` only after implementation and verification. Revisit provider facts and
 - [ ] Obtain and verify official Schwab quote, price-history, account-data endpoints and JSON schemas using an authorized test account.
 - [ ] Decide between entitled Schwab data and documented free alternatives; reject paid tiers/trials.
 - [ ] Verify Alpaca account and market-data terms; only then configure server-side credentials and permit any provider call.
-- [ ] Wire the backend into the UI with visible IEX-only coverage, freshness, missing-data and provider-error states; keep unsupported/OTC symbols unavailable.
+- [x] Wire the loopback backend to Flutter with validated provider/feed identity, coverage, freshness, missing-data and sanitized errors; originally a manual view, now replaced by automatic temporary Ideas.
+- [x] Implement raw daily-history client support for the last 30 calendar days, preserving trading-date/timezone metadata; the original manual history table was removed at user request.
+- [x] Verify browser-safe injected HTTP/service ownership, strict response validation, forbidden remote URLs, sanitized arbitrary error bodies and stale-response guards with fixture and widget tests.
+- [x] Validate the research UI with formatting, clean `flutter analyze`, all 101 Flutter tests, `flutter build web` (including its Wasm dry run), and a successful IDE build. No live-provider requests were made for this validation; authentication/rights checks remain unchecked above.
 - [ ] Verify provider rate headers and cache rights in an authorized account; keep memory caching disabled unless permitted.
 - [ ] Test delayed/stale/unavailable behavior and microcap symbol coverage; never infer full market coverage from single-venue data.
 - [ ] Verify provider data retention, display, and GPT-processing permissions before storing or forwarding market data.
 
 ## Phase 3 — News, social, company filings
+
+### Current bounded local-research increment
+
+- [x] Verify existing frontend research contract against the implemented POST route.
+- [x] Verify quote/daily-bar/SEC handlers with deterministic fixtures and explicit unavailability; SEC filing dates remain date-only, with actual retrieval timestamps.
+- [x] Verify exact symbol-only arguments, native call IDs, complete batch validation, three-turn/four-tool budgets and shared per-model-call accounting.
+- [x] Verify unsupported/unsafe citations and local-provider failures fail explicitly without OpenAI or market-provider fallback.
+- [x] Demonstrate the configured LM Studio native tool-request/result/final cycle with synthetic data only: `google/gemma-4-e4b`, two actual chat calls, one validated `get_market_quote`, linked result received, final synthetic price `17.375` reproduced. No market/SEC network or OpenAI request.
+- [x] Run formatting, clean Dart backend/Flutter analysis, 94 targeted tests, all 190 regression tests, IDE build and same-origin Flutter Web compilation (Wasm dry run passed). Ordinary suites intentionally skip the one native opt-in test; it passed independently.
+- [ ] Verify authorized live quote/bar/SEC access separately; fixture success is not provider authentication, account entitlement or data-use permission.
+- [ ] Complete the deterministic daily-indicator engine beyond its first slice: trend/EMA, RSI/MACD, ATR/volatility, dollar volume/liquidity and explicit application integration.
+
+**Validation notes:** initial integration runs failed on SEC constructor alignment, a frontend helper's scope, a relative-link citation guard and synthetic test-clock/date expectations. These were corrected; the final targeted/full suites and analyzers have no outstanding failures. A SEC filing date is not converted to an invented midnight publication timestamp. Quote fixtures also cover crossed bid/ask rejection and an old trade price paired with a newer quote. SEC fixtures cover permissions/User-Agent, safe links/issuer/date metadata, conservative shared pacing/quotas/cooldowns, malformed and oversized responses, transport failures and timeouts.
+
+**Remaining verification boundaries:** no live market-data/SEC request or OpenAI call was made. Account authentication, permitted display/model processing, source coverage and live SEC access still need authorized setup; health is not an entitlement check. SEC timeout reporting does not guarantee underlying HTTP cancellation. Native local inference success establishes one synthetic tool cycle only, not reliable financial interpretations or performance.
 
 - [ ] Resolve tickers to SEC CIK and ingest SEC submissions/company-facts with an identifying User-Agent and fair-access rate limiter.
 - [ ] Parse linked SEC filing documents (including Form 4 XML when needed) with source URLs and filed/received timestamps.
@@ -55,6 +81,33 @@ Use `[x]` only after implementation and verification. Revisit provider facts and
 - [ ] Normalize, source-link, timestamp, deduplicate and retain only permitted research records.
 
 ## Phase 4 — Screening and GPT
+
+### First deterministic indicator slice
+
+- [x] Add a pure Dart calculation layer using existing `MarketBar` records without new APIs/dependencies.
+- [x] Validate identity, adjustment, OHLCV, session ordering/date semantics, explicit completed-session cutoff and timestamp consistency.
+- [x] Implement session colors/counts/fractions, green:red ratio, close returns, SMA and relative volume with declared formulas and units.
+- [x] Return typed unavailability for insufficient samples, unverified/missing expected sessions, stale inputs, zero denominators and non-finite results; never fill gaps.
+- [x] Preserve per-result provenance, feed-volume limitations and raw-price comparability gates.
+- [x] Verify golden fixtures, boundaries, malformed input, date/freshness/coverage behavior, immutable output and deterministic/prefix behavior.
+- [x] Run formatting, 28 focused indicator tests, all 218 regression tests, clean Flutter/backend analysis and IDE validation; existing research/Ask AI/market regressions pass. Same-origin Flutter Web compilation and Wasm dry run passed. The native LM Studio test remains opt-in and was skipped in this increment; no model/provider requests were required.
+- [ ] Add the remaining MACD, ATR/volatility and liquidity indicators. No current stock screening or quantitative AI authority is implied.
+
+**First-slice verification boundaries:** expected sessions and raw-price comparability are supplied by callers, not independently verified by this library. Timestamp-only bars use labelled UTC-date proxies, not exchange-timezone conversion. IEX volume remains partial; Twelve Data daily EOD volume uses the distinct complete-but-account-coverage-unverified label. Card/tool integration was added in the follow-on below. No new external API, credential, dependency, scoring, trade-plan or performance claim was added.
+
+### Trend / EMA / RSI and explicit indicator integration
+
+- [x] Extend deterministic calculations with normalized SMA slope/trend, SMA-seeded EMA and Wilder RSI, including flat/zero-gain/zero-loss conventions and versioned parameters.
+- [x] Verify independent golden vectors, seed/warmup thresholds, missing/stale historical windows, numerical stability and serialization: 44 engine tests passed.
+- [x] Expose a bounded read-only indicator endpoint using the existing gated daily-bar adapter without extra providers, retries or silent fallback.
+- [x] Establish expected completed US sessions independently of returned bars; document regular holiday/calendar scope, delayed availability assumptions and exceptional-closure limitations.
+- [x] Add symbol-only `get_technical_indicators` to local research; preserve three model turns/four tool executions, local-only routing and actual result/citation provenance.
+- [x] Add an explicit card action showing deterministic values, unavailable reasons, source/date/feed, formula version and coverage/freshness limits; no automatic history or AI calls.
+- [x] Validate frontend response shapes/units and lifecycle handling, including refresh/backend changes, unavailable data and sanitized failures: 30 client/card tests and eight service/calendar/HTTP tests passed, including actual endpoint-to-frontend parsing.
+- [x] Verify the real local native indicator tool request/result/final cycle using synthetic bars only: configured `google/gemma-4-e4b` passed the opt-in indicator test; the native quote cycle also passed again. No live provider/SEC or OpenAI requests.
+- [x] Run formatting, all 274 regression tests, clean Flutter/backend analysis, IDE validation and same-origin Flutter Web compilation/Wasm dry run. The two native tests are skipped in the ordinary suite and passed separately.
+
+**Follow-on boundaries:** 120 calendar days/records, fixed 20-session SMA/EMA, one-session trend lag and 14-delta RSI; conservative static US-equity calendar for 2025–2030, not authoritative for exceptional closures. Recursive metrics require their entire supplied seed history. Raw arithmetic metrics carry corporate-action distortion caveats; raw close returns remain unavailable without comparability confirmation. Live credentials, permissions, data coverage and browser interaction with live history remain unverified. Initial mid-edit analyzer/test failures were corrected; no outstanding validation failures remain.
 
 - [ ] Define candidate universe and deterministic liquidity, price, volume, momentum and volatility filters.
 - [ ] Compute indicators, spreads, portfolio risk and all price levels in ordinary code.
@@ -102,6 +155,11 @@ Use `[x]` only after implementation and verification. Revisit provider facts and
 
 ## Phase 10 — Reliability and deployment
 
+- [x] Add Windows user-bound encrypted private configuration and reusable setup/launch scripts so API credentials need not be re-entered at each start.
+- [x] Add explicit password-protected trusted-private LAN web/API hosting on port 3000, session expiry, login throttling, Host/Origin validation and bounded static/API requests; no automatic firewall/public exposure.
+- [x] Add explicit Ask AI explanations with server-side LM Studio fallback when OpenAI key absent, optional local auth, separate processing/locality rights gates and bounded/sanitized calls.
+- [x] Verify integrated code with clean analysis, all 141 tests, IDE build, same-origin web build and synthetic DPAPI/launch parsing checks.
+- [ ] Complete private setup, verify authorized live market/model requests, and confirm login/data/model access from a second LAN device. Model listing alone is not inference verification; LAN HTTP is not secure Internet deployment.
 - [ ] Add secret-safe configuration and log redaction.
 - [ ] Add provider timeouts, bounded retries, circuit-breaker/degraded-state behavior and diagnostics.
 - [ ] Add local/self-hosted installation, backup/restore and recovery instructions.

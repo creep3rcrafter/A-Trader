@@ -1,6 +1,13 @@
-enum MarketDataProvider { alpaca, schwab }
+enum MarketDataProvider { alpaca, schwab, twelveData }
 
-enum MarketDataFeed { iex, sip, delayedSip, endOfDay, unknown }
+enum MarketDataFeed {
+  iex,
+  sip,
+  delayedSip,
+  endOfDay,
+  twelveDataUsEquityUnverified,
+  unknown,
+}
 
 enum PriceAdjustment { raw, split, dividend, all, unknown }
 
@@ -78,6 +85,10 @@ class MarketQuote {
     if (feed == MarketDataFeed.delayedSip || feed == MarketDataFeed.endOfDay) {
       return MarketDataFreshness.delayed;
     }
+    if (feed == MarketDataFeed.unknown ||
+        feed == MarketDataFeed.twelveDataUsEquityUnverified) {
+      return MarketDataFreshness.unavailable;
+    }
 
     final age = now.difference(sourceTimestamp);
     if (age.isNegative) return MarketDataFreshness.unavailable;
@@ -123,6 +134,8 @@ class MarketBar {
     required this.volume,
     this.tradeCount,
     this.volumeWeightedPrice,
+    this.tradingDate,
+    this.exchangeTimezone,
   }) {
     if (symbol.isEmpty || symbol != symbol.trim().toUpperCase()) {
       throw ArgumentError.value(
@@ -168,6 +181,8 @@ class MarketBar {
   final int volume;
   final int? tradeCount;
   final double? volumeWeightedPrice;
+  final String? tradingDate;
+  final String? exchangeTimezone;
 
   Map<String, Object?> toJson() => {
     'symbol': symbol,
@@ -183,6 +198,9 @@ class MarketBar {
     'volume': volume,
     'tradeCount': tradeCount,
     'volumeWeightedPrice': volumeWeightedPrice,
+    if (tradingDate != null) 'tradingDate': tradingDate,
+    if (exchangeTimezone != null) 'exchangeTimezone': exchangeTimezone,
+    if (tradingDate != null) 'timestampSemantics': 'exchangeTradingDate',
   };
 }
 

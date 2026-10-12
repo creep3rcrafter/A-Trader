@@ -38,6 +38,7 @@ migrate_working_dir/
 .env.*
 !.env.example
 /A Trader/
+/.local/
 
 # Symbolication related
 app.*.symbols

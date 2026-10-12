@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 
+import 'market_data/local_market_data_service.dart';
+import 'market_data/live_ideas_view.dart';
+import 'providers/local_service_url.dart';
 import 'providers/provider_health.dart';
+import 'providers/assistant_service.dart';
 
 void main() {
   runApp(const MyApp());
@@ -10,47 +14,13 @@ enum IdeaStatus { recommended, saved, monitoring, passed }
 
 enum DashboardSection { ideas, saved, history }
 
-class MockIdea {
-  const MockIdea({
-    required this.ticker,
-    required this.company,
-    required this.price,
-    required this.priceTimestamp,
-    required this.entryLow,
-    required this.entryHigh,
-    required this.stop,
-    required this.holdingPeriod,
-    required this.risk,
-    required this.rank,
-    required this.summary,
-    required this.evidence,
-    required this.indicators,
-    required this.risks,
-  });
-
-  final String ticker;
-  final String company;
-  final double price;
-  final String priceTimestamp;
-  final double entryLow;
-  final double entryHigh;
-  final double stop;
-  final String holdingPeriod;
-  final String risk;
-  final int rank;
-  final String summary;
-  final List<String> evidence;
-  final List<String> indicators;
-  final List<String> risks;
-}
-
 class AppSettings {
   const AppSettings({
     this.portfolioValue = 10000,
     this.allocationPercent = 15,
     this.holdingDays = 10,
     this.maxStocks = 3,
-    this.favorites = const {'NOVA', 'KITE'},
+    this.favorites = const {},
     this.prompt = defaultPrompt,
     this.backendUrl = 'http://127.0.0.1:8765',
   });
@@ -89,92 +59,17 @@ class AppSettings {
   }
 }
 
-const _mockIdeas = [
-  MockIdea(
-    ticker: 'NOVA',
-    company: 'Nova Circuitry (mock company)',
-    price: 2.48,
-    priceTimestamp: 'Oct 10, 2026 · 3:00 PM ET',
-    entryLow: 2.30,
-    entryHigh: 2.42,
-    stop: 2.12,
-    holdingPeriod: '5–10 trading days',
-    risk: 'High',
-    rank: 1,
-    summary: 'A hypothetical pullback setup with improving volume.',
-    evidence: [
-      'Mock catalyst: product update reported in a fictional company release.',
-      'Mock volume: 1.8× its 20-day average in this sample.',
-      'No real filing, news article, or quote is attached.',
-    ],
-    indicators: [
-      'Trend: rising short-term average (mock)',
-      'Relative volume: 1.8× (mock)',
-      'Volatility: elevated (mock)',
-    ],
-    risks: [
-      'Thinly traded names can move through a stop price.',
-      'The example has no verified liquidity or exchange data.',
-    ],
-  ),
-  MockIdea(
-    ticker: 'KITE',
-    company: 'Kite Harbor Robotics (mock company)',
-    price: 1.16,
-    priceTimestamp: 'Oct 10, 2026 · 2:45 PM ET',
-    entryLow: 1.08,
-    entryHigh: 1.13,
-    stop: 0.99,
-    holdingPeriod: '3–7 trading days',
-    risk: 'Very high',
-    rank: 2,
-    summary: 'A speculative watch candidate; confirmation is missing.',
-    evidence: [
-      'Mock price action is near a hypothetical support zone.',
-      'No verified company catalyst is available in this example.',
-    ],
-    indicators: [
-      'Trend: mixed (mock)',
-      'Relative volume: 1.2× (mock)',
-      'Spread: unavailable',
-    ],
-    risks: [
-      'No spread or average dollar-volume data is available.',
-      'The hypothetical setup may never reach its entry range.',
-    ],
-  ),
-  MockIdea(
-    ticker: 'ORBT',
-    company: 'Orbit Materials (mock company)',
-    price: 4.92,
-    priceTimestamp: 'Oct 10, 2026 · 2:30 PM ET',
-    entryLow: 4.55,
-    entryHigh: 4.76,
-    stop: 4.28,
-    holdingPeriod: '7–12 trading days',
-    risk: 'High',
-    rank: 3,
-    summary: 'A hypothetical breakout retest that needs more evidence.',
-    evidence: [
-      'Mock chart pattern only; no real market data is used.',
-      'No filing or verified news catalyst is attached.',
-    ],
-    indicators: [
-      'Trend: neutral-to-positive (mock)',
-      'Relative volume: 1.4× (mock)',
-      'Price range: 4.28–5.15 (mock)',
-    ],
-    risks: [
-      'A breakout can fail quickly in low-liquidity securities.',
-      'Corporate-action history has not been checked.',
-    ],
-  ),
-];
-
 class MyApp extends StatefulWidget {
-  const MyApp({this.providerHealthService, super.key});
+  const MyApp({
+    this.providerHealthService,
+    this.marketDataService,
+    this.assistantService,
+    super.key,
+  });
 
   final ProviderHealthService? providerHealthService;
+  final LocalMarketDataService? marketDataService;
+  final AssistantService? assistantService;
 
   @override
   State<MyApp> createState() => _MyAppState();
@@ -185,23 +80,30 @@ class _MyAppState extends State<MyApp> {
   AppSettings _settings = const AppSettings();
   late final ProviderHealthService _providerHealthService;
   late final bool _ownsProviderHealthService;
-  final Map<String, IdeaStatus> _statuses = {
-    'NOVA': IdeaStatus.recommended,
-    'KITE': IdeaStatus.recommended,
-    'ORBT': IdeaStatus.recommended,
-  };
+  late final LocalMarketDataService _marketDataService;
+  late final bool _ownsMarketDataService;
+  late final AssistantService _assistantService;
+  late final bool _ownsAssistantService;
+  final Map<String, IdeaStatus> _statuses = {};
 
   @override
   void initState() {
     super.initState();
+    _settings = AppSettings(backendUrl: defaultServiceUrl());
     _ownsProviderHealthService = widget.providerHealthService == null;
     _providerHealthService =
         widget.providerHealthService ?? ProviderHealthService();
+    _ownsMarketDataService = widget.marketDataService == null;
+    _marketDataService = widget.marketDataService ?? LocalMarketDataService();
+    _ownsAssistantService = widget.assistantService == null;
+    _assistantService = widget.assistantService ?? AssistantService();
   }
 
   @override
   void dispose() {
     if (_ownsProviderHealthService) _providerHealthService.close();
+    if (_ownsMarketDataService) _marketDataService.close();
+    if (_ownsAssistantService) _assistantService.close();
     super.dispose();
   }
 
@@ -255,6 +157,8 @@ class _MyAppState extends State<MyApp> {
         statuses: _statuses,
         onSettings: _openSettings,
         onStatusChanged: _changeStatus,
+        marketDataService: _marketDataService,
+        assistantService: _assistantService,
       ),
     );
   }
@@ -266,6 +170,8 @@ class DashboardScreen extends StatefulWidget {
     required this.statuses,
     required this.onSettings,
     required this.onStatusChanged,
+    required this.marketDataService,
+    required this.assistantService,
     super.key,
   });
 
@@ -273,6 +179,8 @@ class DashboardScreen extends StatefulWidget {
   final Map<String, IdeaStatus> statuses;
   final ValueChanged<BuildContext> onSettings;
   final void Function(String ticker, IdeaStatus status) onStatusChanged;
+  final LocalMarketDataService marketDataService;
+  final AssistantService assistantService;
 
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
@@ -284,15 +192,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final visibleIdeas = _section == DashboardSection.saved
-        ? _mockIdeas
-              .where(
-                (idea) =>
-                    widget.statuses[idea.ticker] == IdeaStatus.saved ||
-                    widget.statuses[idea.ticker] == IdeaStatus.monitoring,
-              )
-              .toList()
-        : _mockIdeas;
 
     return Scaffold(
       body: SafeArea(
@@ -344,12 +243,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-                        child: _MockDataBanner(),
-                      ),
-                    ),
-                    SliverToBoxAdapter(
-                      child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 20),
                         child: _SectionPicker(
                           section: _section,
@@ -365,109 +258,54 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                       ),
                     ),
-                    if (_section == DashboardSection.history)
-                      const SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.fromLTRB(20, 16, 20, 36),
-                          child: _MockHistory(),
-                        ),
-                      )
-                    else if (visibleIdeas.isEmpty)
-                      const SliverFillRemaining(
-                        hasScrollBody: false,
-                        child: Center(
-                          child: Padding(
-                            padding: EdgeInsets.all(24),
-                            child: Text(
-                              'No saved ideas yet. Save a mock idea to review it here.',
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ),
-                      )
-                    else
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-                        sliver: SliverLayoutBuilder(
-                          builder: (context, sliverConstraints) {
-                            final width =
-                                sliverConstraints.crossAxisExtent > 760
-                                ? (sliverConstraints.crossAxisExtent - 16) / 2
-                                : sliverConstraints.crossAxisExtent;
-                            return SliverToBoxAdapter(
-                              child: Wrap(
-                                spacing: 16,
-                                runSpacing: 16,
-                                children: [
-                                  for (final idea in visibleIdeas)
-                                    SizedBox(
-                                      width: width,
-                                      child: _IdeaCard(
-                                        idea: idea,
-                                        status: widget.statuses[idea.ticker]!,
-                                        onStatusChanged: (status) =>
-                                            widget.onStatusChanged(
-                                              idea.ticker,
-                                              status,
-                                            ),
-                                      ),
-                                    ),
-                                ],
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 16, 20, 36),
+                        child: Column(
+                          children: [
+                            if (_section == DashboardSection.history)
+                              const Text(
+                                'No historical results yet. Persistent recommendation '
+                                'journaling and outcome tracking are not implemented.',
                               ),
-                            );
-                          },
+                            Offstage(
+                              key: const ValueKey('live_ideas'),
+                              offstage: _section == DashboardSection.history,
+                              child: LiveIdeasView(
+                                backendUrl: widget.settings.backendUrl,
+                                service: widget.marketDataService,
+                                assistantService: widget.assistantService,
+                                analysisPrompt: widget.settings.prompt,
+                                holdingDays: widget.settings.holdingDays,
+                                savedOnly: _section == DashboardSection.saved,
+                                savedTickers: {
+                                  for (final entry in widget.statuses.entries)
+                                    if (entry.value == IdeaStatus.saved ||
+                                        entry.value == IdeaStatus.monitoring)
+                                      entry.key,
+                                },
+                                onToggleSaved: (ticker) =>
+                                    widget.onStatusChanged(
+                                      ticker,
+                                      widget.statuses[ticker] ==
+                                                  IdeaStatus.saved ||
+                                              widget.statuses[ticker] ==
+                                                  IdeaStatus.monitoring
+                                          ? IdeaStatus.recommended
+                                          : IdeaStatus.saved,
+                                    ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
+                    ),
                   ],
                 ),
               ),
             );
           },
         ),
-      ),
-    );
-  }
-}
-
-class _MockDataBanner extends StatelessWidget {
-  const _MockDataBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: colors.tertiaryContainer,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.science_outlined, color: colors.onTertiaryContainer),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'MOCK DATA — NOT LIVE MARKET INFORMATION',
-                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: colors.onTertiaryContainer,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  'All prices, companies, evidence, and outcomes below are illustrative. No provider is connected.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colors.onTertiaryContainer,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -514,333 +352,6 @@ class _SectionPicker extends StatelessWidget {
   }
 }
 
-class _IdeaCard extends StatelessWidget {
-  const _IdeaCard({
-    required this.idea,
-    required this.status,
-    required this.onStatusChanged,
-  });
-
-  final MockIdea idea;
-  final IdeaStatus status;
-  final ValueChanged<IdeaStatus> onStatusChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isSaved =
-        status == IdeaStatus.saved || status == IdeaStatus.monitoring;
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      color: theme.colorScheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: BorderSide(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 16, 14, 12),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 46,
-                  height: 46,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Text(
-                    idea.ticker.substring(0, 1),
-                    style: TextStyle(
-                      color: theme.colorScheme.onPrimaryContainer,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 19,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Wrap(
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 8,
-                        children: [
-                          Text(
-                            '${idea.rank}. ${idea.ticker}',
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          _Tag(label: 'MOCK'),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        idea.company,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  key: Key('save_${idea.ticker}'),
-                  tooltip: isSaved ? 'Remove saved idea' : 'Save idea',
-                  onPressed: () => onStatusChanged(
-                    isSaved ? IdeaStatus.recommended : IdeaStatus.saved,
-                  ),
-                  icon: Icon(
-                    isSaved ? Icons.bookmark : Icons.bookmark_border,
-                    color: isSaved ? theme.colorScheme.primary : null,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18),
-            child: Text(idea.summary, style: theme.textTheme.bodyMedium),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
-            child: Column(
-              children: [
-                _SummaryRow(
-                  label: 'Last-known price',
-                  value: '\$${idea.price.toStringAsFixed(2)} · MOCK',
-                ),
-                _SummaryRow(
-                  label: 'Price timestamp',
-                  value: idea.priceTimestamp,
-                ),
-                _SummaryRow(
-                  label: 'Proposed entry',
-                  value:
-                      '\$${idea.entryLow.toStringAsFixed(2)}–\$${idea.entryHigh.toStringAsFixed(2)}',
-                ),
-                _SummaryRow(
-                  label: 'Stop-loss',
-                  value: '\$${idea.stop.toStringAsFixed(2)}',
-                ),
-                _SummaryRow(label: 'Holding period', value: idea.holdingPeriod),
-                _SummaryRow(label: 'Risk', value: idea.risk, last: true),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
-            child: ExpansionTile(
-              key: Key('details_${idea.ticker}'),
-              tilePadding: const EdgeInsets.symmetric(horizontal: 8),
-              childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
-              title: const Text('Details, evidence & risks'),
-              subtitle: const Text('Illustrative indicators only'),
-              children: [
-                _DetailGroup(
-                  title: 'Supporting evidence',
-                  items: idea.evidence,
-                ),
-                _DetailGroup(title: 'Indicators', items: idea.indicators),
-                _DetailGroup(title: 'Risks', items: idea.risks),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
-            child: SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                key: Key('why_${idea.ticker}'),
-                onPressed: () => _showMockExplanation(context, idea),
-                icon: const Icon(Icons.auto_awesome_outlined),
-                label: const Text('Ask GPT Why (mock)'),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-void _showMockExplanation(BuildContext context, MockIdea idea) {
-  showDialog<void>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: Text('${idea.ticker}: mock explanation'),
-      content: const Text(
-        'This is a sample response only. No GPT request was made. '
-        'The hypothetical setup has limited illustrative support and '
-        'substantial microcap liquidity risk; verify all inputs before '
-        'considering any real trade.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Close'),
-        ),
-      ],
-    ),
-  );
-}
-
-class _SummaryRow extends StatelessWidget {
-  const _SummaryRow({
-    required this.label,
-    required this.value,
-    this.last = false,
-  });
-
-  final String label;
-  final String value;
-  final bool last;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 7),
-      decoration: BoxDecoration(
-        border: last
-            ? null
-            : Border(
-                bottom: BorderSide(color: theme.colorScheme.outlineVariant),
-              ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Text(
-              value,
-              textAlign: TextAlign.end,
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DetailGroup extends StatelessWidget {
-  const _DetailGroup({required this.title, required this.items});
-
-  final String title;
-  final List<String> items;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: Theme.of(
-              context,
-            ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 4),
-          for (final item in items)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('•  '),
-                  Expanded(child: Text(item)),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Tag extends StatelessWidget {
-  const _Tag({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: colors.secondaryContainer,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        label,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: colors.onSecondaryContainer,
-          fontWeight: FontWeight.w800,
-        ),
-      ),
-    );
-  }
-}
-
-class _MockHistory extends StatelessWidget {
-  const _MockHistory();
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Historical results',
-          style: Theme.of(
-            context,
-          ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(height: 5),
-        Text(
-          'Illustrative examples only — not tracked or verified outcomes.',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 16),
-        for (final item in const [
-          ('MOCK-01', 'LUMA', 'Completed · hypothetical +4.2%'),
-          ('MOCK-02', 'PICO', 'Unfilled · entry range not reached'),
-        ])
-          Card(
-            margin: const EdgeInsets.only(bottom: 10),
-            child: ListTile(
-              leading: const Icon(Icons.history),
-              title: Text('${item.$2} · ${item.$1}'),
-              subtitle: Text(item.$3),
-              trailing: const _Tag(label: 'MOCK'),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     required this.initialSettings,
@@ -869,6 +380,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ProviderHealthSnapshot? _providerHealth;
   String? _providerHealthError;
   bool _checkingProviders = false;
+  int _healthGeneration = 0;
   late double _portfolioValue;
   late double _allocationPercent;
   late int _holdingDays;
@@ -900,6 +412,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    _healthGeneration++;
     _portfolioController.dispose();
     _allocationController.dispose();
     _holdingDaysController.dispose();
@@ -910,6 +423,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _save() {
+    final backendUri = Uri.tryParse(_backendUrlController.text.trim());
+    if (backendUri == null || !isLocalServiceUri(backendUri)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Use loopback or the same server as this web app.'),
+        ),
+      );
+      return;
+    }
     final portfolio = double.tryParse(_portfolioController.text);
     final allocation = double.tryParse(_allocationController.text);
     final days = int.tryParse(_holdingDaysController.text);
@@ -950,6 +472,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _checkProviderConnections() async {
+    final generation = ++_healthGeneration;
     setState(() {
       _checkingProviders = true;
       _providerHealthError = null;
@@ -957,22 +480,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final backendUri = Uri.parse(_backendUrlController.text.trim());
       final snapshot = await widget.providerHealthService.check(backendUri);
-      if (!mounted) return;
+      if (!mounted || generation != _healthGeneration) return;
       setState(() => _providerHealth = snapshot);
     } on FormatException {
-      if (!mounted) return;
+      if (!mounted || generation != _healthGeneration) return;
       setState(() {
         _providerHealth = null;
         _providerHealthError = 'Enter a valid local service URL.';
       });
     } on ProviderHealthException catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _healthGeneration) return;
       setState(() {
         _providerHealth = null;
         _providerHealthError = error.message;
       });
     } finally {
-      if (mounted) setState(() => _checkingProviders = false);
+      if (mounted && generation == _healthGeneration) {
+        setState(() => _checkingProviders = false);
+      }
     }
   }
 
@@ -1066,14 +591,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  'Mock favorites receive extra attention, but cannot bypass risk checks.',
+                  'Favorites are session-only. Automated research and risk screening are not implemented yet.',
                   style: theme.textTheme.bodySmall,
                 ),
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 8,
                   children: [
-                    for (final ticker in ['NOVA', 'KITE', 'ORBT'])
+                    for (final ticker in temporaryStocks.map(
+                      (stock) => stock.$1,
+                    ))
                       FilterChip(
                         key: Key('favorite_$ticker'),
                         label: Text(ticker),
@@ -1125,7 +652,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(height: 24),
                 Text(
-                  'GPT prompt · version 1 (mock)',
+                  'Analysis prompt · draft version 1',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w700,
                   ),
@@ -1139,7 +666,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   decoration: const InputDecoration(
                     border: OutlineInputBorder(),
                     helperText:
-                        'Editable preview only. No model request is sent.',
+                        'Used only when you press Ask AI on a stock. Saving does not send a model request.',
                     alignLabelWithHint: true,
                   ),
                   onChanged: (_) => setState(() {}),
@@ -1174,9 +701,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     labelText: 'Local service URL',
                     border: OutlineInputBorder(),
                     helperText:
-                        'Loopback only. Restart the service after changing server environment settings.',
+                        'Loopback or this web app\'s same-origin server only. Save to reload Ideas. Server keys can be stored privately with the setup script.',
                   ),
                   onChanged: (_) => setState(() {
+                    _healthGeneration++;
+                    _checkingProviders = false;
                     _providerHealth = null;
                     _providerHealthError = null;
                   }),
@@ -1212,6 +741,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
                 const SizedBox(height: 8),
+                _ProviderStatus(
+                  name: 'Twelve Data market research',
+                  status: _providerLabel(
+                    _providerHealth?.providers['twelveData'],
+                    credentialsVariable: 'TWELVE_DATA_API_KEY',
+                    readyStatus:
+                        'Configured for research/testing; provider not tested',
+                    pendingStatus: 'Research terms confirmation required',
+                  ),
+                  details:
+                      'Basic free REST: 8 credits/minute, 800/day. Default US feed is partial-volume; OTC and paid add-ons are excluded. Personal research/testing only, not shared display.',
+                ),
                 _ProviderStatus(
                   name: 'Schwab Trader API',
                   status: _providerLabel(
@@ -1272,7 +813,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     credentialsVariable: 'OPENAI_API_KEY',
                   ),
                   details:
-                      'OpenAI connector is not implemented. Requests are not made and credentials are not needed for this phase.',
+                      'Optional paid analysis, server-side only. Used when configured and explicitly enabled; errors never trigger a silent provider switch.',
+                ),
+                _ProviderStatus(
+                  name: 'LM Studio local AI',
+                  status: _providerLabel(
+                    _providerHealth?.providers['lmStudio'],
+                    noKeyRequired: true,
+                    readyStatus: 'Configured locally; model not tested',
+                    pendingStatus:
+                        'Configure an installed model and enable analysis',
+                  ),
+                  details:
+                      'Local server at 127.0.0.1:1234; no API charges for local inference. Fallback when no OpenAI key is configured. Model and data-use permissions are configured on the server.',
                 ),
                 if (_providerHealth != null)
                   Text(
@@ -1282,7 +835,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 const SizedBox(height: 16),
                 Text(
-                  'All changes are local to this demo session and reset when the app restarts.',
+                  'UI settings reset when the app restarts. Server credentials are saved separately by scripts\\setup_local.ps1 using Windows user-bound encryption.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -1349,17 +902,19 @@ class _PromptPreview extends StatelessWidget {
       prompt,
       '',
       'MARKET / TECHNICAL INPUTS',
-      'NOVA: mock price \$2.48; entry \$2.30–\$2.42; stop \$2.12; mock relative volume 1.8×.',
+      'Ask AI fetches a verified quote on the server and includes its source, timestamps and missing-data limitations. No technical screening or trade-price calculations are implemented.',
       '',
       'RESEARCH EVIDENCE',
-      'Mock-only sample. No live articles or filings are provided.',
+      'No articles or filings are connected yet.',
       '',
       'PORTFOLIO / RISK',
       'Portfolio: \$$portfolioValue; allocation: $allocationPercent%; '
           'horizon: $holdingDays days; max ideas: $maxStocks; '
           'favorites: ${favorites.isEmpty ? 'none' : favorites.join(', ')}.',
       '',
-      'Model: none · prompt version: mock-v1 · credentials: not included.',
+      'Model: server-selected OpenAI when configured, otherwise local LM Studio; '
+          'explicit server enablement and data-use permission required. '
+          'Prompt version: draft-v1 · credentials: never included.',
     ].join('\n');
 
     return Container(
@@ -1373,7 +928,7 @@ class _PromptPreview extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Request preview · mock inputs only',
+            'Draft request preview · requests only through Ask AI',
             style: theme.textTheme.labelLarge?.copyWith(
               fontWeight: FontWeight.w800,
             ),
@@ -1406,11 +961,21 @@ String _providerLabel(
   if (noKeyRequired && !status.integrationImplemented) {
     return 'No key required · integration pending';
   }
+  if (noKeyRequired) {
+    return status.enabled
+        ? readyStatus ?? 'Configured · provider not tested'
+        : pendingStatus ?? 'Not enabled · no key required';
+  }
   if (!status.credentialsPresent) {
     return 'Credentials missing · ${credentialsVariable ?? 'not configured'}';
   }
   if (status.enabled && status.integrationImplemented) {
     return readyStatus ?? 'Configured · provider not tested';
+  }
+  if (status.id == 'twelveData' &&
+      status.integrationImplemented &&
+      status.termsConfirmed) {
+    return 'Credentials detected · not selected as active provider';
   }
   return 'Credentials detected · ${pendingStatus ?? 'connector pending'}';
 }

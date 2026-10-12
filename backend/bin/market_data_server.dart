@@ -1,276 +1,227 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:a_trade/market_data/alpaca_market_data_client.dart';
 import 'package:a_trade/market_data/market_data.dart';
+import 'package:a_trade/market_data/twelve_data_market_data_client.dart';
+
+// ignore: avoid_relative_lib_imports
+import '../lib/assistant.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/daily_indicator_service.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/server.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/lan_data_policy.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/research.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/sec_filings.dart';
 
 Future<void> main() async {
-  final port = _readPort(Platform.environment['A_TRADER_PORT']);
-  final keyId = Platform.environment['ALPACA_API_KEY_ID'];
-  final secret = Platform.environment['ALPACA_API_SECRET_KEY'];
-  final schwabCredentialsPresent =
-      _isConfigured('SCHWAB_CLIENT_ID') &&
-      _isConfigured('SCHWAB_CLIENT_SECRET');
-  final alphaVantageCredentialsPresent = _isConfigured('ALPHA_VANTAGE_API_KEY');
-  final brightDataCredentialsPresent = _isConfigured('BRIGHT_DATA_API_TOKEN');
-  final openAiCredentialsPresent = _isConfigured('OPENAI_API_KEY');
-  final termsConfirmed =
-      Platform.environment['ALPACA_MARKET_DATA_TERMS_CONFIRMED'] == 'true';
-  final credentialsAvailable =
-      keyId != null &&
-      keyId.trim().isNotEmpty &&
-      secret != null &&
-      secret.trim().isNotEmpty;
-  final client = credentialsAvailable && termsConfirmed
+  final environment = Platform.environment;
+  final lanDataPolicy = LanDataPolicy.fromEnvironment(environment);
+  final port = _readPort(environment['A_TRADER_PORT']);
+  final selectedProvider = _readProvider(
+    environment['A_TRADER_MARKET_DATA_PROVIDER'],
+  );
+  final alpacaKeyId = environment['ALPACA_API_KEY_ID'];
+  final alpacaSecret = environment['ALPACA_API_SECRET_KEY'];
+  final twelveDataKey = environment['TWELVE_DATA_API_KEY'];
+  final alpacaTermsConfirmed =
+      environment['ALPACA_MARKET_DATA_TERMS_CONFIRMED'] == 'true';
+  final twelveDataTermsConfirmed =
+      environment['TWELVE_DATA_RESEARCH_TERMS_CONFIRMED'] == 'true';
+  final alpacaCredentialsPresent =
+      _isPresent(alpacaKeyId) && _isPresent(alpacaSecret);
+  final alpacaClient =
+      selectedProvider == MarketDataProvider.alpaca &&
+          alpacaCredentialsPresent &&
+          alpacaTermsConfirmed &&
+          lanDataPolicy.permits(MarketDataProvider.alpaca)
       ? AlpacaMarketDataClient(
-          apiKeyId: keyId,
-          apiSecretKey: secret,
-          allowCaching:
-              Platform.environment['ALPACA_DATA_CACHING_PERMITTED'] == 'true',
+          apiKeyId: alpacaKeyId!,
+          apiSecretKey: alpacaSecret!,
+          allowCaching: environment['ALPACA_DATA_CACHING_PERMITTED'] == 'true',
         )
       : null;
-  final allowedOrigin = Platform.environment['A_TRADER_ALLOWED_ORIGIN'];
+  final twelveDataCredentialsPresent = _isPresent(twelveDataKey);
+  final twelveDataClient =
+      selectedProvider == MarketDataProvider.twelveData &&
+          twelveDataCredentialsPresent &&
+          twelveDataTermsConfirmed &&
+          lanDataPolicy.permits(MarketDataProvider.twelveData)
+      ? TwelveDataMarketDataClient(
+          apiKey: twelveDataKey!,
+          quotaLedger: File('.local/twelve_data_quota.json'),
+        )
+      : null;
+  final MarketDataRepository? marketDataClient = switch (selectedProvider) {
+    MarketDataProvider.alpaca => alpacaClient,
+    MarketDataProvider.twelveData => twelveDataClient,
+    MarketDataProvider.schwab => null,
+  };
+  final secFilings = SecFilingsClient(
+    permitted: environment['A_TRADER_SEC_TERMS_CONFIRMED'] == 'true',
+    userAgent: environment['SEC_USER_AGENT'] ?? '',
+  );
   final providerStatuses = <String, Object?>{
     'alpaca': {
-      'credentialsPresent': credentialsAvailable,
-      'enabled': client != null,
+      'credentialsPresent': alpacaCredentialsPresent,
+      'termsConfirmed': alpacaTermsConfirmed,
+      'configured': alpacaCredentialsPresent && alpacaTermsConfirmed,
+      'enabled': alpacaClient != null,
+      'selected': selectedProvider == MarketDataProvider.alpaca,
       'integrationImplemented': true,
-      'termsConfirmed': termsConfirmed,
+      'lanDisplayTermsConfirmed': lanDataPolicy.alpacaDisplayConfirmed,
+    },
+    'twelveData': {
+      'credentialsPresent': twelveDataCredentialsPresent,
+      'termsConfirmed': twelveDataTermsConfirmed,
+      'configured': twelveDataCredentialsPresent && twelveDataTermsConfirmed,
+      'enabled': twelveDataClient != null,
+      'selected': selectedProvider == MarketDataProvider.twelveData,
+      'integrationImplemented': true,
+      'personalResearchOnly': true,
+      'lanRightsConfirmed': lanDataPolicy.twelveDataRightsConfirmed,
     },
     'schwab': {
-      'credentialsPresent': schwabCredentialsPresent,
+      'credentialsPresent':
+          _isPresent(environment['SCHWAB_CLIENT_ID']) &&
+          _isPresent(environment['SCHWAB_CLIENT_SECRET']),
       'enabled': false,
       'integrationImplemented': false,
     },
     'alphaVantage': {
-      'credentialsPresent': alphaVantageCredentialsPresent,
+      'credentialsPresent': _isPresent(environment['ALPHA_VANTAGE_API_KEY']),
       'enabled': false,
       'integrationImplemented': false,
     },
     'brightData': {
-      'credentialsPresent': brightDataCredentialsPresent,
-      'enabled': false,
-      'integrationImplemented': false,
-    },
-    'openAi': {
-      'credentialsPresent': openAiCredentialsPresent,
+      'credentialsPresent': _isPresent(environment['BRIGHT_DATA_API_TOKEN']),
       'enabled': false,
       'integrationImplemented': false,
     },
     'secEdgar': {
       'credentialsPresent': false,
-      'enabled': false,
-      'integrationImplemented': false,
+      'enabled': secFilings.enabled,
+      'integrationImplemented': true,
       'requiresApiKey': false,
     },
   };
-  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
 
-  stdout.writeln(
-    'A-Trader market-data service listening on http://127.0.0.1:$port '
-    '(Alpaca IEX ${client == null ? 'disabled' : 'enabled'}).',
+  final assistantConfiguration = AssistantConfiguration.fromEnvironment(
+    environment,
   );
-  if (!termsConfirmed) {
-    stdout.writeln(
-      'Provider calls are disabled until the Alpaca market-data terms are reviewed.',
+  final modelClient = assistantConfiguration.createModelClient();
+  final callBudget = AssistantCallBudget(configuration: assistantConfiguration);
+  final indicatorService = DailyIndicatorService(
+    marketData: marketDataClient,
+    provider: selectedProvider,
+  );
+  final assistantService = modelClient == null || marketDataClient == null
+      ? null
+      : AssistantService(
+          configuration: assistantConfiguration,
+          marketData: marketDataClient,
+          modelClient: modelClient,
+          marketDataProvider: selectedProvider.name,
+          marketDataCoverage: _coverage(selectedProvider),
+          callBudget: callBudget,
+        );
+  final researchModel = assistantConfiguration.createResearchClient();
+  final researchService = researchModel == null
+      ? null
+      : ResearchService(
+          configuration: assistantConfiguration,
+          modelClient: researchModel,
+          callBudget: callBudget,
+          tools: ResearchTools(
+            marketData: marketDataClient,
+            provider: selectedProvider,
+            secFilings: secFilings,
+            indicatorService: indicatorService,
+          ),
+        );
+  final authenticationEnabled = environment['A_TRADER_AUTH_ENABLED'] == 'true';
+  final server = ATraderServer(
+    bindAddress: environment['A_TRADER_BIND_ADDRESS'] ?? '127.0.0.1',
+    port: port,
+    selectedProvider: selectedProvider,
+    marketDataClient: marketDataClient,
+    providerStatuses: providerStatuses,
+    assistantConfiguration: assistantConfiguration,
+    assistantService: assistantService,
+    researchService: researchService,
+    indicatorService: indicatorService,
+    allowedOrigin: environment['A_TRADER_ALLOWED_ORIGIN'],
+    authenticationEnabled: authenticationEnabled,
+    authenticationPassword: environment['A_TRADER_AUTH_PASSWORD'],
+    staticRoot: environment['A_TRADER_WEB_ROOT'],
+    lanDataPolicy: lanDataPolicy,
+    lanOrigins: environment['A_TRADER_LAN_ORIGINS'],
+  );
+  await server.start();
+  stdout.writeln(
+    'A-Trader service listening on ${server.uri} '
+    '(${selectedProvider.name} market data '
+    '${marketDataClient == null ? 'disabled' : 'enabled'}, '
+    'assistant ${assistantService == null ? 'disabled' : 'enabled'}).',
+  );
+  if (!InternetAddress.tryParse(server.bindAddress)!.isLoopback) {
+    stderr.writeln(
+      'WARNING: LAN HTTP is unencrypted. Use only on a trusted private '
+      'network; never expose this service to the public Internet.',
+    );
+    stderr.writeln(
+      'No firewall rule was changed. Keep this process running only while '
+      'you intend to share the authenticated web app.',
     );
   }
-  if (allowedOrigin == null || allowedOrigin.isEmpty) {
+  if (selectedProvider == MarketDataProvider.twelveData &&
+      !twelveDataTermsConfirmed) {
     stdout.writeln(
-      'Browser requests are disabled until A_TRADER_ALLOWED_ORIGIN is set.',
+      'Twelve Data is disabled until its personal research terms are confirmed.',
+    );
+  } else if (selectedProvider == MarketDataProvider.alpaca &&
+      !alpacaTermsConfirmed) {
+    stdout.writeln(
+      'Provider calls are disabled until Alpaca market-data terms are reviewed.',
     );
   }
-
-  await for (final request in server) {
-    await _handleRequest(request, client, allowedOrigin, providerStatuses);
+  if (!lanDataPolicy.permits(selectedProvider)) {
+    stdout.writeln(
+      'LAN market-data display is disabled until provider-specific LAN rights '
+      'are expressly confirmed. Model-forwarding permission is separate.',
+    );
+  }
+  if (!assistantConfiguration.termsConfirmed) {
+    stdout.writeln(
+      'Assistant forwarding is disabled until model-processing rights are confirmed.',
+    );
+  } else if (!assistantConfiguration.enabledGate) {
+    stdout.writeln(
+      'Assistant is disabled until A_TRADER_ASSISTANT_ENABLED=true.',
+    );
+  }
+  if (server.bindAddress == '127.0.0.1' &&
+      (environment['A_TRADER_ALLOWED_ORIGIN'] == null ||
+          environment['A_TRADER_ALLOWED_ORIGIN']!.isEmpty)) {
+    stdout.writeln(
+      'Browser cross-origin requests are disabled until '
+      'A_TRADER_ALLOWED_ORIGIN is set.',
+    );
   }
 }
 
-Future<void> _handleRequest(
-  HttpRequest request,
-  AlpacaMarketDataClient? client,
-  String? allowedOrigin,
-  Map<String, Object?> providerStatuses,
-) async {
-  if (!_setCorsHeaders(request, allowedOrigin)) {
-    await _respond(request.response, HttpStatus.forbidden, {
-      'error': 'Origin is not allowed.',
-    });
-    return;
-  }
-  if (request.method == 'OPTIONS') {
-    request.response.statusCode = HttpStatus.noContent;
-    await request.response.close();
-    return;
-  }
-  if (request.method != 'GET') {
-    await _respond(request.response, HttpStatus.methodNotAllowed, {
-      'error': 'Only GET requests are supported.',
-    });
-    return;
-  }
+bool _isPresent(String? value) => value != null && value.trim().isNotEmpty;
 
-  try {
-    if (request.uri.path == '/health') {
-      await _respond(request.response, HttpStatus.ok, {
-        'status': 'ok',
-        'provider': 'alpaca',
-        'feed': 'iex',
-        'configured': client != null,
-        'providers': providerStatuses,
-        if (client == null)
-          'disabledReason':
-              'Credentials are missing or data-use terms are not confirmed.',
-        'coverage': 'Supported US stocks and ETFs only; OTC is unavailable.',
-      });
-      return;
-    }
-
-    if (request.uri.path == '/api/v1/market-data/quote') {
-      if (client == null) {
-        await _providerNotConfigured(request.response);
-        return;
-      }
-      final symbol = _requiredQuery(request.uri, 'symbol');
-      final quote = await client.latestQuote(symbol);
-      if (quote == null) {
-        await _respond(request.response, HttpStatus.notFound, {
-          'error': 'No IEX quote or trade is available for this symbol.',
-        });
-        return;
-      }
-      await _respond(request.response, HttpStatus.ok, {
-        'data': quote.toJson(
-          now: DateTime.now().toUtc(),
-          maximumAge: const Duration(minutes: 1),
-        ),
-        if (client.lastRateLimit case final rateLimit?)
-          'rateLimit': rateLimit.toJson(),
-      });
-      return;
-    }
-
-    if (request.uri.path == '/api/v1/market-data/bars') {
-      if (client == null) {
-        await _providerNotConfigured(request.response);
-        return;
-      }
-      final symbol = _requiredQuery(request.uri, 'symbol');
-      final start = _requiredDate(request.uri, 'start');
-      final end = _requiredDate(request.uri, 'end');
-      final adjustment = _readAdjustment(
-        request.uri.queryParameters['adjustment'],
-      );
-      final bars = await client.dailyBars(
-        symbol,
-        start: start,
-        end: end,
-        adjustment: adjustment,
-      );
-      await _respond(request.response, HttpStatus.ok, {
-        'data': [for (final bar in bars) bar.toJson()],
-        'provider': MarketDataProvider.alpaca.name,
-        'feed': MarketDataFeed.iex.name,
-        'count': bars.length,
-        if (client.lastRateLimit case final rateLimit?)
-          'rateLimit': rateLimit.toJson(),
-      });
-      return;
-    }
-
-    await _respond(request.response, HttpStatus.notFound, {
-      'error': 'Route not found.',
-    });
-  } on FormatException catch (error) {
-    await _respond(request.response, HttpStatus.badRequest, {
-      'error': error.message,
-    });
-  } on ArgumentError catch (error) {
-    await _respond(request.response, HttpStatus.badRequest, {
-      'error': error.message,
-    });
-  } on MarketDataException catch (error) {
-    final statusCode = switch (error.statusCode) {
-      HttpStatus.tooManyRequests => HttpStatus.tooManyRequests,
-      _ => HttpStatus.badGateway,
-    };
-    await _respond(request.response, statusCode, {'error': error.message});
-  } on SocketException {
-    await _respond(request.response, HttpStatus.badGateway, {
-      'error': 'Market-data service is unreachable.',
-    });
-  } on TimeoutException {
-    await _respond(request.response, HttpStatus.gatewayTimeout, {
-      'error': 'Market-data request timed out.',
-    });
-  } on HttpException {
-    await _respond(request.response, HttpStatus.badGateway, {
-      'error': 'Market-data HTTP request failed.',
-    });
-  }
-}
-
-bool _isConfigured(String name) {
-  final value = Platform.environment[name];
-  return value != null && value.trim().isNotEmpty;
-}
-
-bool _setCorsHeaders(HttpRequest request, String? allowedOrigin) {
-  final origin = request.headers.value('origin');
-  if (origin == null) return true;
-  if (allowedOrigin == null || origin != allowedOrigin) return false;
-
-  request.response.headers
-    ..set(HttpHeaders.accessControlAllowOriginHeader, allowedOrigin)
-    ..set(HttpHeaders.accessControlAllowMethodsHeader, 'GET, OPTIONS')
-    ..set(HttpHeaders.varyHeader, 'Origin');
-  return true;
-}
-
-Future<void> _providerNotConfigured(
-  HttpResponse response,
-) => _respond(response, HttpStatus.serviceUnavailable, {
-  'error':
-      'Alpaca is not configured. Set server-side API credentials before requesting data.',
-});
-
-Future<void> _respond(
-  HttpResponse response,
-  int statusCode,
-  Map<String, Object?> body,
-) async {
-  response
-    ..statusCode = statusCode
-    ..headers.contentType = ContentType.json
-    ..headers.set(HttpHeaders.cacheControlHeader, 'no-store')
-    ..write(jsonEncode(body));
-  await response.close();
-}
-
-String _requiredQuery(Uri uri, String name) {
-  final value = uri.queryParameters[name];
-  if (value == null || value.trim().isEmpty) {
-    throw FormatException('Missing required query parameter: $name');
-  }
-  return value;
-}
-
-DateTime _requiredDate(Uri uri, String name) {
-  final value = _requiredQuery(uri, name);
-  final parsed = DateTime.tryParse(value);
-  if (parsed == null) throw FormatException('$name must be an ISO-8601 date.');
-  return parsed;
-}
-
-PriceAdjustment _readAdjustment(String? value) {
-  if (value == null || value == 'raw') return PriceAdjustment.raw;
-  return switch (value) {
-    'split' => PriceAdjustment.split,
-    'dividend' => PriceAdjustment.dividend,
-    'all' => PriceAdjustment.all,
+MarketDataProvider _readProvider(String? value) {
+  final normalized = value?.trim().toLowerCase();
+  return switch (normalized) {
+    null || '' || 'alpaca' => MarketDataProvider.alpaca,
+    'twelvedata' || 'twelve_data' => MarketDataProvider.twelveData,
     _ => throw const FormatException(
-      'adjustment must be raw, split, dividend, or all.',
+      'A_TRADER_MARKET_DATA_PROVIDER must be twelveData or alpaca.',
     ),
   };
 }
@@ -285,3 +236,11 @@ int _readPort(String? value) {
   }
   return port;
 }
+
+String _coverage(MarketDataProvider provider) => switch (provider) {
+  MarketDataProvider.alpaca =>
+    'Supported US stocks and ETFs only; IEX single-exchange coverage; OTC unavailable.',
+  MarketDataProvider.twelveData =>
+    'US listed equity realtime is partial (about 5% market volume), not consolidated; daily history has complete US volume after midnight ET on the next trading day; OTC unavailable.',
+  MarketDataProvider.schwab => 'Schwab market-data integration is unavailable.',
+};

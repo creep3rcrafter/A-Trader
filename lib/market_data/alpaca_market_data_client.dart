@@ -84,6 +84,8 @@ class IoMarketDataTransport implements MarketDataTransport {
           'x-ratelimit-limit',
           'x-ratelimit-remaining',
           'x-ratelimit-reset',
+          'api-credits-used',
+          'api-credits-left',
         ])
           name: ?response.headers.value(name),
       },

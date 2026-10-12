@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'local_service_url.dart';
+
 class ProviderHealthException implements Exception {
   const ProviderHealthException(this.message);
 
@@ -88,9 +90,9 @@ class ProviderHealthService {
   final bool _ownsClient;
 
   Future<ProviderHealthSnapshot> check(Uri backendUri) async {
-    if (!_isLoopback(backendUri)) {
+    if (!isLocalServiceUri(backendUri)) {
       throw const ProviderHealthException(
-        'For safety, provider status checks must use the local loopback service.',
+        'Provider checks must use loopback or the same server as this web app.',
       );
     }
 
@@ -101,12 +103,18 @@ class ProviderHealthService {
     );
     late final http.Response response;
     try {
-      response = await _client
-          .get(healthUri)
-          .timeout(const Duration(seconds: 5));
+      final request = http.Request('GET', healthUri)..followRedirects = false;
+      response = await http.Response.fromStream(
+        await _client.send(request).timeout(const Duration(seconds: 5)),
+      ).timeout(const Duration(seconds: 5));
     } on Exception {
       throw const ProviderHealthException(
         'Could not reach the local service. Start it and check the URL.',
+      );
+    }
+    if (response.statusCode == 401) {
+      throw const ProviderHealthException(
+        'Session expired. Reload this page to sign in again.',
       );
     }
     if (response.statusCode != 200) {
@@ -130,20 +138,14 @@ class ProviderHealthService {
     }
     try {
       return ProviderHealthSnapshot.fromJson(decoded);
-    } on FormatException catch (error) {
-      throw ProviderHealthException(error.message);
+    } on FormatException {
+      throw const ProviderHealthException(
+        'Local service returned invalid health data.',
+      );
     }
   }
 
   void close() {
     if (_ownsClient) _client.close();
-  }
-
-  static bool _isLoopback(Uri uri) {
-    if (uri.scheme != 'http' || uri.userInfo.isNotEmpty) return false;
-    return uri.host == 'localhost' ||
-        uri.host == '127.0.0.1' ||
-        uri.host == '::1' ||
-        uri.host == '[::1]';
   }
 }
