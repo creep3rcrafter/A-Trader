@@ -22,7 +22,25 @@
 | OpenAI API | No market data | Interpretation only | Metered paid API, explicitly allowed; current per-model pricing at official page | Optional later; enforce spending controls |
 | Issuer IR / official releases | No normalized quote API | Company announcements/IR RSS and pages | Often publicly accessible, but endpoint availability, polling, retention and terms are issuer-specific | Free fallback, with per-site terms and provenance |
 
-## Schwab Trader API — investigate first
+## Schwab Trader API — read-only increment
+
+**2026-11-05 implementation update:** The supplied schemas and local REST PDF
+pages 22–24 now back a fixture-tested quote/daily-history adapter. Successful
+private OAuth is user-reported, not a quote/history entitlement test.
+`A_TRADER_MARKET_DATA_PROVIDER=schwab` and explicit personal/free usage rights are
+required; LAN/shared display is separately gated. No accounts/orders/streaming,
+paid add-ons or fallback. Source realtime/quoteType do not certify SIP
+entitlement. Daily adjustment/timezone unknown: no Schwab daily indicators or
+economic-return claims. See private setup/smoke commands in
+`LOCAL_PROVIDER_SETUP.md`. The original public-research uncertainties below
+remain relevant to rights/fees, not a request for another schema PDF.
+
+**User-supplied schema reference (2026-11-05):**
+[`SCHWAB_MARKET_DATA_SCHEMAS.md`](SCHWAB_MARKET_DATA_SCHEMAS.md) preserves the
+authenticated-portal `QuoteEquity`, `EquityResponse` (including nested schemas),
+`Candle` and `CandleList` transcription, with explicit missing-field details and
+links to the local PDF references. OAuth exchange/refresh documentation remains
+outstanding; this reference is not live-provider verification.
 
 **Official sources**
 

@@ -5,9 +5,18 @@ import 'package:http/http.dart' as http;
 Map<String, Object?> quoteFixture({
   String symbol = 'AAPL',
   bool twelve = false,
+  bool schwab = false,
 }) {
-  final provider = twelve ? 'twelveData' : 'alpaca';
-  final feed = twelve ? 'twelveDataUsEquityUnverified' : 'iex';
+  final provider = schwab
+      ? 'schwab'
+      : twelve
+      ? 'twelveData'
+      : 'alpaca';
+  final feed = schwab
+      ? 'schwabEquity'
+      : twelve
+      ? 'twelveDataUsEquityUnverified'
+      : 'iex';
   return {
     'provider': provider,
     'feed': feed,
@@ -22,7 +31,16 @@ Map<String, Object?> quoteFixture({
       'bidPrice': null,
       'askPrice': null,
       'quoteAt': null,
-      'freshness': twelve ? 'unavailable' : 'fresh',
+      'freshness': schwab
+          ? 'delayed'
+          : twelve
+          ? 'unavailable'
+          : 'fresh',
+      if (schwab) ...{
+        'realtime': false,
+        'quoteType': 'NFL',
+        'totalVolume': 150000,
+      },
     },
   };
 }
@@ -30,9 +48,18 @@ Map<String, Object?> quoteFixture({
 Map<String, Object?> barsFixture({
   String symbol = 'AAPL',
   bool twelve = false,
+  bool schwab = false,
 }) {
-  final provider = twelve ? 'twelveData' : 'alpaca';
-  final feed = twelve ? 'endOfDay' : 'iex';
+  final provider = schwab
+      ? 'schwab'
+      : twelve
+      ? 'twelveData'
+      : 'alpaca';
+  final feed = schwab
+      ? 'schwabEquity'
+      : twelve
+      ? 'endOfDay'
+      : 'iex';
   final now = DateTime.now().toUtc();
   final day = DateTime.utc(
     now.year,
@@ -51,7 +78,7 @@ Map<String, Object?> barsFixture({
         'feed': feed,
         'timestamp': day.toIso8601String(),
         'retrievedAt': now.toIso8601String(),
-        'adjustment': 'raw',
+        'adjustment': schwab ? 'unknown' : 'raw',
         'open': 121.0,
         'high': 125.0,
         'low': 120.0,
@@ -59,6 +86,7 @@ Map<String, Object?> barsFixture({
         'volume': 1000,
         'tradeCount': null,
         'volumeWeightedPrice': null,
+        if (schwab) 'timestampSemantics': 'utcDateProxy',
         if (twelve) ...{
           'tradingDate': day.toIso8601String().substring(0, 10),
           'exchangeTimezone': 'America/New_York',
@@ -67,6 +95,21 @@ Map<String, Object?> barsFixture({
       },
     ],
   };
+}
+
+Map<String, Object?> cardRequestFixture(
+  http.Request request, {
+  bool twelve = false,
+  bool schwab = false,
+}) {
+  final symbol = request.url.queryParameters['symbol']!;
+  if (request.url.path.endsWith('/bars')) {
+    return barsFixture(symbol: symbol, twelve: twelve, schwab: schwab);
+  }
+  if (!request.url.path.endsWith('/quote')) {
+    throw StateError('Unexpected automatic request: ${request.url.path}');
+  }
+  return quoteFixture(symbol: symbol, twelve: twelve, schwab: schwab);
 }
 
 http.Response fixtureResponse(Map<String, Object?> body, [int status = 200]) =>

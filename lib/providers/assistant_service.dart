@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../market_data/local_market_data_service.dart';
 import 'local_service_url.dart';
+import 'research_url.dart';
 
 class AssistantException implements Exception {
   const AssistantException(this.message);
@@ -34,12 +35,16 @@ class ResearchSource {
     required this.title,
     required this.publishedAt,
     required this.retrievedAt,
+    this.kind,
+    this.provider,
   });
 
   final Uri url;
   final String title;
   final String? publishedAt;
   final DateTime retrievedAt;
+  final String? kind;
+  final String? provider;
 }
 
 class AssistantService {
@@ -197,7 +202,16 @@ class AssistantService {
               uri.host.isEmpty ||
               uri.userInfo.isNotEmpty ||
               uri.hasFragment ||
-              !_isResearchSource(uri, ticker) ||
+              !(source['kind'] == 'webSearch'
+                  ? source['provider'] == 'duckduckgo' &&
+                        source['publishedAt'] == null &&
+                        (json['toolsUsed'] as List).contains(
+                          'search_public_web',
+                        ) &&
+                        isPublicResearchUrl(uri)
+                  : source['kind'] == null &&
+                        source['provider'] == null &&
+                        _isResearchSource(uri, ticker)) ||
               retrieved == null ||
               !RegExp(
                 r'(Z|[+-]\d{2}:\d{2})$',
@@ -214,6 +228,8 @@ class AssistantService {
               title: source['title'] as String,
               publishedAt: source['publishedAt'] as String?,
               retrievedAt: retrieved.toUtc(),
+              kind: source['kind'] as String?,
+              provider: source['provider'] as String?,
             ),
           );
         }
@@ -224,6 +240,7 @@ class AssistantService {
                 'get_daily_bars',
                 'get_sec_filings',
                 'get_technical_indicators',
+                'search_public_web',
               ].contains(tool)) {
             throw const FormatException();
           }
@@ -268,6 +285,16 @@ class AssistantService {
               '/v2/stocks/$symbol/bars',
             }.contains(uri.path) &&
             uri.queryParameters['feed'] == 'iex',
+      'api.schwabapi.com' =>
+        uri.port == 443 &&
+            ((uri.path == '/marketdata/v1/quotes' &&
+                    uri.queryParametersAll.length == 1 &&
+                    uri.queryParametersAll['symbols']?.length == 1 &&
+                    uri.queryParameters['symbols'] == symbol) ||
+                (uri.path == '/marketdata/v1/pricehistory' &&
+                    uri.queryParametersAll.length == 1 &&
+                    uri.queryParametersAll['symbol']?.length == 1 &&
+                    uri.queryParameters['symbol'] == symbol)),
       'api.twelvedata.com' =>
         {'/quote', '/time_series'}.contains(uri.path) &&
             uri.queryParameters['symbol'] == symbol &&

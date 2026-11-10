@@ -13,9 +13,7 @@ import 'market_data_fixtures.dart';
 
 LocalMarketDataService _marketService() => LocalMarketDataService(
   client: MockClient(
-    (request) async => fixtureResponse(
-      quoteFixture(symbol: request.url.queryParameters['symbol']!),
-    ),
+    (request) async => fixtureResponse(cardRequestFixture(request)),
   ),
 );
 
@@ -79,12 +77,28 @@ void main() {
     await tester.pumpWidget(MyApp(marketDataService: _marketService()));
     await tester.pumpAndSettle();
 
+    await _scrollTo(tester, find.byKey(const Key('expand_SOFI')));
+    await tester.tap(find.byKey(const Key('expand_SOFI')));
+    await tester.pumpAndSettle();
     await _scrollTo(tester, find.byKey(const Key('details_SOFI')));
     await tester.tap(find.byKey(const Key('details_SOFI')));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('IEX is single-exchange'), findsOneWidget);
-    expect(find.textContaining('Retrieved (UTC)'), findsOneWidget);
+    final details = find.byKey(const Key('details_SOFI'));
+    expect(
+      find.descendant(
+        of: details,
+        matching: find.textContaining('IEX is single-exchange'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: details,
+        matching: find.textContaining('Retrieved (UTC)'),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('ideas can be saved and reviewed in the saved section', (
@@ -125,10 +139,7 @@ void main() {
       await _scrollSettingsTo(tester, find.byKey(const Key('prompt_preview')));
       expect(find.byKey(const Key('prompt_preview')), findsOneWidget);
       await _scrollSettingsTo(tester, find.byKey(const Key('backend_url')));
-      expect(
-        find.byKey(const Key('check_provider_connections')),
-        findsOneWidget,
-      );
+      expect(find.byKey(const Key('local_connection_status')), findsOneWidget);
       await _scrollSettingsTo(tester, find.text('Twelve Data market research'));
       expect(find.textContaining('TWELVE_DATA_API_KEY'), findsOneWidget);
       await _scrollSettingsTo(tester, find.text('Schwab Trader API'));
@@ -173,7 +184,10 @@ void main() {
             'schwab': {
               'credentialsPresent': true,
               'enabled': false,
-              'integrationImplemented': false,
+              'integrationImplemented': true,
+              'authorizationStored': true,
+              'termsConfirmed': false,
+              'selected': false,
             },
             'alphaVantage': {
               'credentialsPresent': false,
@@ -211,9 +225,8 @@ void main() {
     await tester.pumpAndSettle();
     await _scrollSettingsTo(
       tester,
-      find.byKey(const Key('check_provider_connections')),
+      find.byKey(const Key('local_connection_status')),
     );
-    await tester.tap(find.byKey(const Key('check_provider_connections')));
     await tester.pumpAndSettle();
 
     await _scrollSettingsTo(tester, find.text('Twelve Data market research'));
@@ -225,7 +238,9 @@ void main() {
     );
     await _scrollSettingsTo(tester, find.text('Schwab Trader API'));
     expect(
-      find.textContaining('Credentials detected · Approval / adapter pending'),
+      find.textContaining(
+        'Private OAuth stored · confirm market-data usage rights',
+      ),
       findsOneWidget,
     );
     await _scrollSettingsTo(tester, find.text('Alpaca IEX market data'));
@@ -287,9 +302,8 @@ void main() {
         await tester.pumpAndSettle();
         await _scrollSettingsTo(
           tester,
-          find.byKey(const Key('check_provider_connections')),
+          find.byKey(const Key('local_connection_status')),
         );
-        await tester.tap(find.byKey(const Key('check_provider_connections')));
         await tester.pumpAndSettle();
         await _scrollSettingsTo(
           tester,

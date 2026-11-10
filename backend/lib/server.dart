@@ -186,6 +186,7 @@ class ATraderServer {
     } on MarketDataException catch (error) {
       final statusCode = switch (error.statusCode) {
         HttpStatus.notFound => HttpStatus.notFound,
+        HttpStatus.serviceUnavailable => HttpStatus.serviceUnavailable,
         HttpStatus.tooManyRequests => HttpStatus.tooManyRequests,
         _ => HttpStatus.badGateway,
       };
@@ -293,6 +294,8 @@ class ATraderServer {
         'configured': marketDataClient != null && _displayPermitted,
         'providers': {
           ...providerStatuses,
+          if (researchService?.tools.webSearch case final search?)
+            'duckDuckGo': search.health,
           if (!_displayPermitted)
             selectedProvider.name: {
               if (providerStatuses[selectedProvider.name]
@@ -408,6 +411,14 @@ class ATraderServer {
         });
         return;
       }
+      if (selectedProvider == MarketDataProvider.schwab &&
+          (quote.symbol != symbol.trim().toUpperCase() ||
+              quote.provider != selectedProvider ||
+              quote.feed != MarketDataFeed.schwabEquity ||
+              quote.sourceTimestamp.isAfter(quote.retrievedAt) ||
+              quote.retrievedAt.isAfter(_clock().toUtc()))) {
+        throw const MarketDataException('Invalid Schwab quote provenance.');
+      }
       await _respond(request.response, HttpStatus.ok, {
         'data': quote.toJson(
           now: DateTime.now().toUtc(),
@@ -443,6 +454,19 @@ class ATraderServer {
         end: end,
         adjustment: adjustment,
       );
+      if (selectedProvider == MarketDataProvider.schwab &&
+          (bars.length > 120 ||
+              bars.any(
+                (bar) =>
+                    bar.symbol != symbol.trim().toUpperCase() ||
+                    bar.provider != selectedProvider ||
+                    bar.feed != MarketDataFeed.schwabEquity ||
+                    bar.adjustment != PriceAdjustment.unknown,
+              ))) {
+        throw const MarketDataException(
+          'Invalid Schwab daily history provenance.',
+        );
+      }
       await _respond(request.response, HttpStatus.ok, {
         'data': [for (final bar in bars) bar.toJson()],
         'provider': selectedProvider.name,
@@ -965,13 +989,13 @@ class ATraderServer {
   String _healthFeed(MarketDataProvider provider) => switch (provider) {
     MarketDataProvider.alpaca => MarketDataFeed.iex.name,
     MarketDataProvider.twelveData => 'partial_us_equity_unverified',
-    MarketDataProvider.schwab => MarketDataFeed.unknown.name,
+    MarketDataProvider.schwab => MarketDataFeed.schwabEquity.name,
   };
 
   String _barsFeed(MarketDataProvider provider) => switch (provider) {
     MarketDataProvider.alpaca => MarketDataFeed.iex.name,
     MarketDataProvider.twelveData => MarketDataFeed.endOfDay.name,
-    MarketDataProvider.schwab => MarketDataFeed.unknown.name,
+    MarketDataProvider.schwab => MarketDataFeed.schwabEquity.name,
   };
 
   String _coverage(MarketDataProvider provider) => switch (provider) {
@@ -980,7 +1004,7 @@ class ATraderServer {
     MarketDataProvider.twelveData =>
       'US listed equity realtime is partial (about 5% market volume), not consolidated; daily history has complete US volume after midnight ET on the next trading day; OTC unavailable.',
     MarketDataProvider.schwab =>
-      'Schwab market-data integration is unavailable.',
+      'Schwab equity REST; realtime/quoteType are source metadata, not verified SIP entitlement. Daily adjustment/timezone unknown; indicators unavailable.',
   };
 }
 

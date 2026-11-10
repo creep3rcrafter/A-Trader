@@ -20,6 +20,8 @@ class ProviderConnectionStatus {
     required this.enabled,
     required this.integrationImplemented,
     this.termsConfirmed = false,
+    this.authorizationStored = false,
+    this.selected = false,
   });
 
   final String id;
@@ -27,6 +29,8 @@ class ProviderConnectionStatus {
   final bool enabled;
   final bool integrationImplemented;
   final bool termsConfirmed;
+  final bool authorizationStored;
+  final bool selected;
 
   factory ProviderConnectionStatus.fromJson(
     String id,
@@ -38,6 +42,8 @@ class ProviderConnectionStatus {
       enabled: _requiredBool(json, 'enabled'),
       integrationImplemented: _requiredBool(json, 'integrationImplemented'),
       termsConfirmed: json['termsConfirmed'] == true,
+      authorizationStored: json['authorizationStored'] == true,
+      selected: json['selected'] == true,
     );
   }
 

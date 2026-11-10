@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'market_data/local_market_data_service.dart';
@@ -5,6 +7,7 @@ import 'market_data/live_ideas_view.dart';
 import 'providers/local_service_url.dart';
 import 'providers/provider_health.dart';
 import 'providers/assistant_service.dart';
+import 'providers/backend_process.dart';
 
 void main() {
   runApp(const MyApp());
@@ -64,12 +67,14 @@ class MyApp extends StatefulWidget {
     this.providerHealthService,
     this.marketDataService,
     this.assistantService,
+    this.backendProcessController,
     super.key,
   });
 
   final ProviderHealthService? providerHealthService;
   final LocalMarketDataService? marketDataService;
   final AssistantService? assistantService;
+  final BackendProcessController? backendProcessController;
 
   @override
   State<MyApp> createState() => _MyAppState();
@@ -84,6 +89,8 @@ class _MyAppState extends State<MyApp> {
   late final bool _ownsMarketDataService;
   late final AssistantService _assistantService;
   late final bool _ownsAssistantService;
+  late final BackendProcessController _backendProcessController;
+  late final bool _ownsBackendProcessController;
   final Map<String, IdeaStatus> _statuses = {};
 
   @override
@@ -97,6 +104,9 @@ class _MyAppState extends State<MyApp> {
     _marketDataService = widget.marketDataService ?? LocalMarketDataService();
     _ownsAssistantService = widget.assistantService == null;
     _assistantService = widget.assistantService ?? AssistantService();
+    _ownsBackendProcessController = widget.backendProcessController == null;
+    _backendProcessController =
+        widget.backendProcessController ?? createBackendProcessController();
   }
 
   @override
@@ -104,6 +114,7 @@ class _MyAppState extends State<MyApp> {
     if (_ownsProviderHealthService) _providerHealthService.close();
     if (_ownsMarketDataService) _marketDataService.close();
     if (_ownsAssistantService) _assistantService.close();
+    if (_ownsBackendProcessController) _backendProcessController.dispose();
     super.dispose();
   }
 
@@ -118,6 +129,7 @@ class _MyAppState extends State<MyApp> {
           initialSettings: _settings,
           initialThemeMode: _themeMode,
           providerHealthService: _providerHealthService,
+          backendProcessController: _backendProcessController,
           onSave: (settings, themeMode) {
             setState(() {
               _settings = settings;
@@ -358,6 +370,7 @@ class SettingsScreen extends StatefulWidget {
     required this.initialThemeMode,
     required this.onSave,
     required this.providerHealthService,
+    this.backendProcessController,
     super.key,
   });
 
@@ -365,6 +378,7 @@ class SettingsScreen extends StatefulWidget {
   final ThemeMode initialThemeMode;
   final void Function(AppSettings settings, ThemeMode themeMode) onSave;
   final ProviderHealthService providerHealthService;
+  final BackendProcessController? backendProcessController;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -380,6 +394,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   ProviderHealthSnapshot? _providerHealth;
   String? _providerHealthError;
   bool _checkingProviders = false;
+  bool _healthInFlight = false;
+  Timer? _healthTimer;
+  bool _controllingBackend = false;
+  String? _backendControlMessage;
   int _healthGeneration = 0;
   late double _portfolioValue;
   late double _allocationPercent;
@@ -408,11 +426,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _maxStocksController = TextEditingController(text: '$_maxStocks');
     _promptController = TextEditingController(text: settings.prompt);
     _backendUrlController = TextEditingController(text: settings.backendUrl);
+    unawaited(_checkProviderConnections());
+    _healthTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_checkProviderConnections()),
+    );
   }
 
   @override
   void dispose() {
     _healthGeneration++;
+    _healthTimer?.cancel();
     _portfolioController.dispose();
     _allocationController.dispose();
     _holdingDaysController.dispose();
@@ -472,6 +496,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _checkProviderConnections() async {
+    if (_healthInFlight || !mounted) return;
+    _healthInFlight = true;
     final generation = ++_healthGeneration;
     setState(() {
       _checkingProviders = true;
@@ -494,10 +520,89 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _providerHealth = null;
         _providerHealthError = error.message;
       });
+    } on Exception {
+      if (!mounted || generation != _healthGeneration) return;
+      setState(() {
+        _providerHealth = null;
+        _providerHealthError = 'Could not check the local service.';
+      });
     } finally {
+      _healthInFlight = false;
       if (mounted && generation == _healthGeneration) {
         setState(() => _checkingProviders = false);
+      } else if (mounted) {
+        unawaited(_checkProviderConnections());
       }
+    }
+  }
+
+  void _serviceUrlChanged() {
+    setState(() {
+      _healthGeneration++;
+      _checkingProviders = true;
+      _providerHealth = null;
+      _providerHealthError = null;
+      _backendControlMessage = null;
+    });
+    unawaited(_checkProviderConnections());
+  }
+
+  Future<void> _controlBackend({required bool start}) async {
+    final controller = widget.backendProcessController;
+    if (controller == null || !controller.available || _controllingBackend) {
+      return;
+    }
+    setState(() {
+      _controllingBackend = true;
+      _backendControlMessage = null;
+    });
+    try {
+      if (start) {
+        final uri = Uri.parse(_backendUrlController.text.trim());
+        await _checkProviderConnections();
+        if (!mounted) return;
+        if (_providerHealth != null) {
+          setState(() {
+            _backendControlMessage =
+                'Existing backend detected. It is not owned by this app and will not be stopped.';
+          });
+          return;
+        }
+        await controller.start(uri);
+        for (var attempt = 0; attempt < 10 && mounted; attempt++) {
+          await Future<void>.delayed(const Duration(seconds: 1));
+          if (!mounted) return;
+          await _checkProviderConnections();
+          if (_providerHealth != null || !controller.ownsBackend) break;
+        }
+        if (mounted) {
+          setState(() {
+            _backendControlMessage = !controller.ownsBackend
+                ? 'The app-owned backend exited during startup. Check local setup; any other backend is not controlled by this app.'
+                : _providerHealth != null
+                ? 'Backend started by this app.'
+                : 'Backend launched but not reachable yet. Checks continue every 30 seconds; Stop affects only this app’s process.';
+          });
+        }
+      } else {
+        _healthGeneration++;
+        await controller.stop();
+        if (!mounted) return;
+        await _checkProviderConnections();
+        if (mounted) {
+          setState(() => _backendControlMessage = 'App-owned backend stopped.');
+        }
+      }
+    } on BackendProcessException catch (error) {
+      if (mounted) setState(() => _backendControlMessage = error.message);
+    } on Exception {
+      if (mounted) {
+        setState(() {
+          _backendControlMessage = 'Backend control failed. Check local setup.';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _controllingBackend = false);
     }
   }
 
@@ -703,35 +808,91 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     helperText:
                         'Loopback or this web app\'s same-origin server only. Save to reload Ideas. Server keys can be stored privately with the setup script.',
                   ),
-                  onChanged: (_) => setState(() {
-                    _healthGeneration++;
-                    _checkingProviders = false;
-                    _providerHealth = null;
-                    _providerHealthError = null;
-                  }),
+                  enabled: !_controllingBackend,
+                  onChanged: (_) => _serviceUrlChanged(),
                 ),
                 const SizedBox(height: 8),
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: FilledButton.icon(
-                    key: const Key('check_provider_connections'),
-                    onPressed: _checkingProviders
-                        ? null
-                        : _checkProviderConnections,
-                    icon: _checkingProviders
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.sync),
-                    label: Text(
-                      _checkingProviders
-                          ? 'Checking local service…'
-                          : 'Check local connections',
+                  child: Semantics(
+                    key: const Key('local_connection_status'),
+                    liveRegion: true,
+                    label: _checkingProviders
+                        ? 'Checking local service'
+                        : _providerHealth != null
+                        ? 'Local service reachable'
+                        : 'Local service unreachable',
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _checkingProviders
+                              ? Icons.pending
+                              : _providerHealth != null
+                              ? Icons.check_circle
+                              : Icons.cancel,
+                          key: const Key('local_connection_icon'),
+                          color: _checkingProviders
+                              ? theme.colorScheme.onSurfaceVariant
+                              : _providerHealth != null
+                              ? Colors.green
+                              : Colors.red,
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            _checkingProviders
+                                ? 'Checking local service…'
+                                : _providerHealth != null
+                                ? 'Local service reachable'
+                                : 'Local service unreachable',
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
+                const Text(
+                  'Automatic check every 30 seconds while Settings is open.',
+                ),
+                if (widget.backendProcessController?.available == true) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        key: const Key('start_backend'),
+                        onPressed:
+                            _controllingBackend ||
+                                _checkingProviders ||
+                                _providerHealth != null ||
+                                widget.backendProcessController!.ownsBackend
+                            ? null
+                            : () => _controlBackend(start: true),
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Start backend'),
+                      ),
+                      OutlinedButton.icon(
+                        key: const Key('stop_backend'),
+                        onPressed:
+                            _controllingBackend ||
+                                !widget.backendProcessController!.ownsBackend
+                            ? null
+                            : () => _controlBackend(start: false),
+                        icon: const Icon(Icons.stop),
+                        label: const Text('Stop backend'),
+                      ),
+                    ],
+                  ),
+                  const Text(
+                    'Stop affects only the backend started by this app. An externally started backend is never stopped.',
+                  ),
+                  if (_backendControlMessage != null)
+                    Text(
+                      _backendControlMessage!,
+                      key: const Key('backend_control_message'),
+                    ),
+                ],
                 if (_providerHealthError != null) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -760,10 +921,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     credentialsVariable:
                         'SCHWAB_CLIENT_ID / '
                         'SCHWAB_CLIENT_SECRET',
-                    pendingStatus: 'Approval / adapter pending',
+                    pendingStatus:
+                        'Select Schwab and confirm market-data/display rights privately',
                   ),
                   details:
-                      'Credentials are only staged when Schwab approves the app and read-only market-data access. OAuth adapter is not implemented.',
+                      'Read-only equity quotes and bounded daily history via private OAuth. Source realtime/quoteType do not verify SIP entitlement. Adjustment unknown: indicators unavailable. Accounts/orders disabled.',
                 ),
                 _ProviderStatus(
                   name: 'Alpaca IEX market data',
@@ -971,6 +1133,18 @@ String _providerLabel(
   }
   if (status.enabled && status.integrationImplemented) {
     return readyStatus ?? 'Configured · provider not tested';
+  }
+  if (status.id == 'schwab' && status.integrationImplemented) {
+    if (!status.authorizationStored) {
+      return 'Credentials detected · private OAuth required';
+    }
+    if (!status.termsConfirmed) {
+      return 'Private OAuth stored · confirm market-data usage rights';
+    }
+    if (!status.selected) {
+      return 'Private OAuth stored · not selected as active provider';
+    }
+    return 'Private OAuth stored · check LAN display rights/platform';
   }
   if (status.id == 'twelveData' &&
       status.integrationImplemented &&

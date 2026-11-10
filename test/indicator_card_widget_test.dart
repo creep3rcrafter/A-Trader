@@ -28,6 +28,10 @@ Widget indicatorView(
 );
 
 Future<void> tapIndicators(WidgetTester tester) async {
+  final header = find.byKey(const Key('expand_SOFI'));
+  await tester.ensureVisible(header);
+  await tester.tap(header);
+  await tester.pumpAndSettle();
   final button = find.byKey(const Key('indicators_SOFI'));
   await tester.ensureVisible(button);
   await tester.tap(button);
@@ -45,7 +49,7 @@ void main() {
             indicatorCalls++;
             return fixtureResponse(indicatorCardFixture(symbol: symbol));
           }
-          return fixtureResponse(quoteFixture(symbol: symbol));
+          return fixtureResponse(cardRequestFixture(request));
         }),
       );
       await tester.pumpWidget(indicatorView(service));
@@ -81,9 +85,7 @@ void main() {
               'limitations': ['No completed bars are available.'],
             });
           }
-          return fixtureResponse(
-            quoteFixture(symbol: request.url.queryParameters['symbol']!),
-          );
+          return fixtureResponse(cardRequestFixture(request));
         }),
       );
       await tester.pumpWidget(indicatorView(service));
@@ -106,9 +108,7 @@ void main() {
           calls++;
           return http.Response('{"error":"credential private detail"}', 429);
         }
-        return fixtureResponse(
-          quoteFixture(symbol: request.url.queryParameters['symbol']!),
-        );
+        return fixtureResponse(cardRequestFixture(request));
       }),
     );
     await tester.pumpWidget(indicatorView(service));
@@ -117,7 +117,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(calls, 1);
     expect(find.byKey(const Key('indicator_error_SOFI')), findsOneWidget);
-    expect(find.textContaining('quota exhausted'), findsOneWidget);
+    expect(find.textContaining('provider cooldown reached'), findsOneWidget);
     expect(find.textContaining('private detail'), findsNothing);
   });
 
@@ -128,9 +128,7 @@ void main() {
     final service = LocalMarketDataService(
       client: MockClient((request) async {
         if (request.url.path.endsWith('/indicators')) return pending.future;
-        return fixtureResponse(
-          quoteFixture(symbol: request.url.queryParameters['symbol']!),
-        );
+        return fixtureResponse(cardRequestFixture(request));
       }),
     );
     await tester.pumpWidget(indicatorView(service));
@@ -157,9 +155,7 @@ void main() {
             calls++;
             return fixtureResponse(indicatorCardFixture());
           }
-          return fixtureResponse(
-            quoteFixture(symbol: request.url.queryParameters['symbol']!),
-          );
+          return fixtureResponse(cardRequestFixture(request));
         }),
       );
       await tester.pumpWidget(indicatorView(service));
@@ -185,9 +181,7 @@ void main() {
             calls++;
             return pending.future;
           }
-          return fixtureResponse(
-            quoteFixture(symbol: request.url.queryParameters['symbol']!),
-          );
+          return fixtureResponse(cardRequestFixture(request));
         }),
       );
       await tester.pumpWidget(indicatorView(service));
@@ -198,6 +192,10 @@ void main() {
         find.byKey(const Key('refresh_ideas')),
       );
       expect(refresh.onPressed, isNull);
+      final header = find.byKey(const Key('expand_RKLB'));
+      await tester.ensureVisible(header);
+      await tester.tap(header);
+      await tester.pump();
       final other = tester.widget<OutlinedButton>(
         find.byKey(const Key('indicators_RKLB')),
       );

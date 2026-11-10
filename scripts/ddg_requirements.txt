@@ -1,0 +1,1 @@
+duckduckgo-mcp-server @ https://files.pythonhosted.org/packages/b6/a0/311135b8e69edb68be846ae9bb4656f2545952aef0ca26729e56e822e12e/duckduckgo_mcp_server-0.7.0-py3-none-any.whl#sha256=2f676339f888971f33c6ebcc9952a307de066dc57fd8a6df23c7f3eb1ce74ba7

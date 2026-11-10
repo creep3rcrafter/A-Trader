@@ -5,6 +5,7 @@ class LanDataPolicy {
     required this.lanMode,
     this.alpacaDisplayConfirmed = false,
     this.twelveDataRightsConfirmed = false,
+    this.schwabDisplayConfirmed = false,
   });
 
   factory LanDataPolicy.fromEnvironment(Map<String, String> environment) =>
@@ -19,17 +20,20 @@ class LanDataPolicy {
             environment['ALPACA_LAN_DISPLAY_TERMS_CONFIRMED'] == 'true',
         twelveDataRightsConfirmed:
             environment['TWELVE_DATA_LAN_RIGHTS_CONFIRMED'] == 'true',
+        schwabDisplayConfirmed:
+            environment['SCHWAB_LAN_DISPLAY_TERMS_CONFIRMED'] == 'true',
       );
 
   final bool lanMode;
   final bool alpacaDisplayConfirmed;
   final bool twelveDataRightsConfirmed;
+  final bool schwabDisplayConfirmed;
 
   bool permits(MarketDataProvider provider) =>
       !lanMode ||
       switch (provider) {
         MarketDataProvider.alpaca => alpacaDisplayConfirmed,
         MarketDataProvider.twelveData => twelveDataRightsConfirmed,
-        MarketDataProvider.schwab => false,
+        MarketDataProvider.schwab => schwabDisplayConfirmed,
       };
 }

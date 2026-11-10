@@ -185,8 +185,11 @@ void main() {
       throwsA(
         isA<LocalMarketDataException>().having(
           (e) => e.message,
-          'safe quota error',
-          allOf(contains('quota'), isNot(contains('private'))),
+          'safe request-limit error',
+          allOf(
+            contains('provider cooldown reached'),
+            isNot(contains('private')),
+          ),
         ),
       ),
     );

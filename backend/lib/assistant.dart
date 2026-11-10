@@ -519,6 +519,10 @@ class AssistantService {
       if (quote == null ||
           quote.symbol != symbol ||
           quote.provider.name != marketDataProvider ||
+          (quote.provider == MarketDataProvider.schwab &&
+              (quote.feed != MarketDataFeed.schwabEquity ||
+                  quote.sourceTimestamp.isAfter(quote.retrievedAt) ||
+                  quote.retrievedAt.isAfter(_clock().toUtc()))) ||
           quote.lastPrice == null) {
         throw const AssistantRequestException(
           HttpStatus.badGateway,

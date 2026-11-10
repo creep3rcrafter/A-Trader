@@ -6,6 +6,7 @@ enum MarketDataFeed {
   delayedSip,
   endOfDay,
   twelveDataUsEquityUnverified,
+  schwabEquity,
   unknown,
 }
 
@@ -24,6 +25,9 @@ class MarketQuote {
     this.bidPrice,
     this.askPrice,
     this.quoteAt,
+    this.realtime,
+    this.quoteType,
+    this.totalVolume,
   }) {
     if (symbol.isEmpty || symbol != symbol.trim().toUpperCase()) {
       throw ArgumentError.value(
@@ -55,6 +59,9 @@ class MarketQuote {
   final double? bidPrice;
   final double? askPrice;
   final DateTime? quoteAt;
+  final bool? realtime;
+  final String? quoteType;
+  final int? totalVolume;
 
   DateTime get sourceTimestamp {
     if (lastTradeAt == null) return quoteAt!;
@@ -74,6 +81,11 @@ class MarketQuote {
     'bidPrice': bidPrice,
     'askPrice': askPrice,
     'quoteAt': quoteAt?.toUtc().toIso8601String(),
+    if (provider == MarketDataProvider.schwab) ...{
+      'realtime': realtime,
+      'quoteType': quoteType,
+      'totalVolume': totalVolume,
+    },
     if (now != null && maximumAge != null)
       'freshness': freshnessAt(now: now, maximumAge: maximumAge).name,
   };
@@ -82,6 +94,13 @@ class MarketQuote {
     required DateTime now,
     required Duration maximumAge,
   }) {
+    if (feed == MarketDataFeed.schwabEquity) {
+      if (now.isBefore(sourceTimestamp)) return MarketDataFreshness.unavailable;
+      if (realtime == false) return MarketDataFreshness.delayed;
+      if (realtime != true || quoteType != 'NBBO') {
+        return MarketDataFreshness.unavailable;
+      }
+    }
     if (feed == MarketDataFeed.delayedSip || feed == MarketDataFeed.endOfDay) {
       return MarketDataFreshness.delayed;
     }
@@ -115,6 +134,9 @@ class MarketQuote {
       bidPrice: other.bidPrice ?? bidPrice,
       askPrice: other.askPrice ?? askPrice,
       quoteAt: other.quoteAt ?? quoteAt,
+      realtime: other.realtime ?? realtime,
+      quoteType: other.quoteType ?? quoteType,
+      totalVolume: other.totalVolume ?? totalVolume,
     );
   }
 }
@@ -136,6 +158,7 @@ class MarketBar {
     this.volumeWeightedPrice,
     this.tradingDate,
     this.exchangeTimezone,
+    this.timestampSemantics,
   }) {
     if (symbol.isEmpty || symbol != symbol.trim().toUpperCase()) {
       throw ArgumentError.value(
@@ -183,6 +206,7 @@ class MarketBar {
   final double? volumeWeightedPrice;
   final String? tradingDate;
   final String? exchangeTimezone;
+  final String? timestampSemantics;
 
   Map<String, Object?> toJson() => {
     'symbol': symbol,
@@ -200,7 +224,8 @@ class MarketBar {
     'volumeWeightedPrice': volumeWeightedPrice,
     if (tradingDate != null) 'tradingDate': tradingDate,
     if (exchangeTimezone != null) 'exchangeTimezone': exchangeTimezone,
-    if (tradingDate != null) 'timestampSemantics': 'exchangeTradingDate',
+    if (timestampSemantics != null || tradingDate != null)
+      'timestampSemantics': timestampSemantics ?? 'exchangeTradingDate',
   };
 }
 

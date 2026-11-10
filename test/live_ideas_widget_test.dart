@@ -16,6 +16,7 @@ Widget view(
   String url = 'http://127.0.0.1:8765',
   AssistantService? assistant,
   String prompt = 'Explain the verified quote limitations.',
+  DateTime Function()? clock,
 }) => MaterialApp(
   home: Scaffold(
     body: SingleChildScrollView(
@@ -24,6 +25,7 @@ Widget view(
         service: service,
         assistantService: assistant,
         analysisPrompt: prompt,
+        requestClock: clock,
         savedTickers: const {},
         savedOnly: false,
         onToggleSaved: (_) {},
@@ -32,16 +34,77 @@ Widget view(
   ),
 );
 
+Future<void> expandAndTap(WidgetTester tester, String action) async {
+  final header = find.byKey(const Key('expand_SOFI'));
+  await tester.ensureVisible(header);
+  await tester.pumpAndSettle();
+  await tester.tap(header);
+  await tester.pumpAndSettle();
+  final button = find.byKey(Key(action));
+  await tester.ensureVisible(button);
+  await tester.pumpAndSettle();
+  await tester.tap(button);
+}
+
 void main() {
+  testWidgets(
+    'Schwab card preserves metadata and explicitly unavailable daily change',
+    (tester) async {
+      final market = LocalMarketDataService(
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/bars')) {
+            return fixtureResponse(
+              barsFixture(
+                symbol: request.url.queryParameters['symbol']!,
+                schwab: true,
+              ),
+            );
+          }
+          final body = quoteFixture(
+            symbol: request.url.queryParameters['symbol']!,
+          );
+          body['provider'] = 'schwab';
+          body['feed'] = 'schwabEquity';
+          final data = body['data'] as Map<String, dynamic>;
+          data['provider'] = 'schwab';
+          data['feed'] = 'schwabEquity';
+          data['realtime'] = false;
+          data['quoteType'] = 'NFL';
+          data['totalVolume'] = 150000;
+          data['freshness'] = 'delayed';
+          return fixtureResponse(body);
+        }),
+      );
+      await tester.pumpWidget(view(market, clock: tester.binding.clock.now));
+      await tester.pump();
+      for (var index = 0; index < 19; index++) {
+        await tester.pump(const Duration(seconds: 7));
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('schwab / schwabEquity'), findsWidgets);
+      final header = find.byKey(const Key('expand_SOFI'));
+      await tester.ensureVisible(header);
+      await tester.tap(header);
+      await tester.pumpAndSettle();
+      final details = find.byKey(const Key('details_SOFI'));
+      await tester.ensureVisible(details);
+      await tester.tap(details);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Provider realtime: false'), findsOneWidget);
+      expect(find.textContaining('quote type: NFL'), findsOneWidget);
+      expect(find.textContaining('150000'), findsWidgets);
+      expect(find.text('Daily change'), findsOneWidget);
+      expect(find.textContaining('Prior regular-session close'), findsWidgets);
+    },
+  );
   testWidgets('local research is explicit and renders real tool metadata', (
     tester,
   ) async {
     var calls = 0;
     final market = LocalMarketDataService(
       client: MockClient(
-        (request) async => fixtureResponse(
-          quoteFixture(symbol: request.url.queryParameters['symbol']!),
-        ),
+        (request) async => fixtureResponse(cardRequestFixture(request)),
       ),
     );
     final assistant = AssistantService(
@@ -64,7 +127,7 @@ void main() {
     expect(calls, 0);
     await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('research_ai_SOFI')));
+    await expandAndTap(tester, 'research_ai_SOFI');
     await tester.pumpAndSettle();
     expect(calls, 1);
     expect(find.text('Tools used: get_market_quote'), findsOneWidget);
@@ -76,9 +139,7 @@ void main() {
   ) async {
     final marketService = LocalMarketDataService(
       client: MockClient(
-        (request) async => fixtureResponse(
-          quoteFixture(symbol: request.url.queryParameters['symbol']!),
-        ),
+        (request) async => fixtureResponse(cardRequestFixture(request)),
       ),
     );
     final response = Completer<http.Response>();
@@ -89,7 +150,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.drag(find.byType(Scrollable).first, const Offset(0, -300));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('ask_ai_SOFI')));
+    await expandAndTap(tester, 'ask_ai_SOFI');
     await tester.pump();
     await tester.pumpWidget(
       view(marketService, assistant: assistant, prompt: 'New prompt.'),
@@ -112,9 +173,7 @@ void main() {
       var analysisCalls = 0;
       final marketService = LocalMarketDataService(
         client: MockClient(
-          (request) async => fixtureResponse(
-            quoteFixture(symbol: request.url.queryParameters['symbol']!),
-          ),
+          (request) async => fixtureResponse(cardRequestFixture(request)),
         ),
       );
       final assistant = AssistantService(
@@ -136,7 +195,7 @@ void main() {
       expect(analysisCalls, 0);
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -400));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('ask_ai_SOFI')));
+      await expandAndTap(tester, 'ask_ai_SOFI');
       await tester.pumpAndSettle();
       expect(analysisCalls, 1);
       expect(find.text('lmstudio / fixture-local'), findsOneWidget);
@@ -152,9 +211,7 @@ void main() {
     (tester) async {
       final marketService = LocalMarketDataService(
         client: MockClient(
-          (request) async => fixtureResponse(
-            quoteFixture(symbol: request.url.queryParameters['symbol']!),
-          ),
+          (request) async => fixtureResponse(cardRequestFixture(request)),
         ),
       );
       final assistant = AssistantService(
@@ -168,7 +225,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.drag(find.byType(Scrollable).first, const Offset(0, -400));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('ask_ai_SOFI')));
+      await expandAndTap(tester, 'ask_ai_SOFI');
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('analysis_error_SOFI')), findsOneWidget);
       expect(find.textContaining('Assistant unavailable'), findsOneWidget);
@@ -182,9 +239,10 @@ void main() {
     final symbols = <String>[];
     final service = LocalMarketDataService(
       client: MockClient((request) async {
-        expect(request.url.path, '/api/v1/market-data/quote');
-        symbols.add(request.url.queryParameters['symbol']!);
-        return fixtureResponse(quoteFixture(symbol: symbols.last));
+        if (request.url.path.endsWith('/quote')) {
+          symbols.add(request.url.queryParameters['symbol']!);
+        }
+        return fixtureResponse(cardRequestFixture(request));
       }),
     );
     await tester.pumpWidget(MyApp(marketDataService: service));
@@ -222,13 +280,13 @@ void main() {
         await tester.pumpWidget(view(service));
         await tester.pumpAndSettle();
         expect(calls, 1);
-        expect(find.textContaining('Not requested:'), findsNWidgets(9));
+        expect(find.textContaining('Not requested:'), findsNWidgets(19));
         expect(
           find.textContaining('do not expose arbitrary body'),
           findsNothing,
         );
         expect(find.text('\$123.5000'), findsNothing);
-        expect(find.text('Refresh quotes'), findsOneWidget);
+        expect(find.text('Refresh quotes & charts'), findsOneWidget);
       },
     );
   }
@@ -239,14 +297,16 @@ void main() {
       client: MockClient((request) async {
         calls++;
         final symbol = request.url.queryParameters['symbol']!;
-        return symbol == 'SOFI'
+        return symbol == 'SOFI' && request.url.path.endsWith('/quote')
             ? fixtureResponse({'error': 'missing'}, 404)
-            : fixtureResponse(quoteFixture(symbol: symbol));
+            : fixtureResponse(cardRequestFixture(request));
       }),
     );
-    await tester.pumpWidget(view(service));
+    await tester.pumpWidget(view(service, clock: tester.binding.clock.now));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 11));
     await tester.pumpAndSettle();
-    expect(calls, 10);
+    expect(calls, 20);
     expect(
       find.text('No market data is available for this ticker.'),
       findsOneWidget,
@@ -261,15 +321,10 @@ void main() {
     final service = LocalMarketDataService(
       client: MockClient((request) async {
         calls++;
-        return fixtureResponse(
-          quoteFixture(
-            symbol: request.url.queryParameters['symbol']!,
-            twelve: true,
-          ),
-        );
+        return fixtureResponse(cardRequestFixture(request, twelve: true));
       }),
     );
-    await tester.pumpWidget(view(service));
+    await tester.pumpWidget(view(service, clock: tester.binding.clock.now));
     await tester.pump();
     expect(calls, 1);
     await tester.pump(const Duration(seconds: 10));
@@ -277,12 +332,12 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     await tester.pump();
     expect(calls, 2);
-    for (var index = 2; index < 10; index++) {
+    for (var index = 2; index < 20; index++) {
       await tester.pump(const Duration(seconds: 11));
       await tester.pump();
     }
-    expect(calls, 10);
-    expect(find.text('Refresh quotes'), findsOneWidget);
+    expect(calls, 20);
+    expect(find.text('Refresh quotes & charts'), findsOneWidget);
   });
 
   testWidgets('backend changes discard stale in-flight responses', (
@@ -294,6 +349,9 @@ void main() {
       client: MockClient((request) async {
         calls.add(request.url);
         if (request.url.port == 8765) return oldResponse.future;
+        if (request.url.path.endsWith('/bars')) {
+          return fixtureResponse(cardRequestFixture(request));
+        }
         final fixture = quoteFixture(
           symbol: request.url.queryParameters['symbol']!,
         );
@@ -301,14 +359,21 @@ void main() {
         return fixtureResponse(fixture);
       }),
     );
-    await tester.pumpWidget(view(service));
+    await tester.pumpWidget(view(service, clock: tester.binding.clock.now));
     await tester.pump();
-    await tester.pumpWidget(view(service, url: 'http://127.0.0.1:8766'));
+    await tester.pumpWidget(
+      view(
+        service,
+        url: 'http://127.0.0.1:8766',
+        clock: tester.binding.clock.now,
+      ),
+    );
+    await tester.pump(const Duration(seconds: 11));
     await tester.pumpAndSettle();
     oldResponse.complete(fixtureResponse(quoteFixture(symbol: 'SOFI')));
     await tester.pumpAndSettle();
     expect(calls.where((url) => url.port == 8765).length, 1);
-    expect(calls.where((url) => url.port == 8766).length, 10);
+    expect(calls.where((url) => url.port == 8766).length, 20);
     expect(find.text('\$9.2500'), findsNWidgets(10));
     expect(find.text('\$123.5000'), findsNothing);
   });

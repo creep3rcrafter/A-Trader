@@ -4,6 +4,7 @@ import 'local_market_data_service.dart';
 import 'market_data.dart';
 import 'daily_indicators.dart';
 import 'indicator_snapshot.dart';
+import 'daily_candle_chart.dart';
 import '../providers/assistant_service.dart';
 
 const temporaryStocks = <(String, String)>[
@@ -29,6 +30,7 @@ class LiveIdeasView extends StatefulWidget {
     this.assistantService,
     this.analysisPrompt = '',
     this.holdingDays = 10,
+    this.requestClock,
     super.key,
   });
 
@@ -40,6 +42,7 @@ class LiveIdeasView extends StatefulWidget {
   final AssistantService? assistantService;
   final String analysisPrompt;
   final int holdingDays;
+  final DateTime Function()? requestClock;
 
   @override
   State<LiveIdeasView> createState() => _LiveIdeasViewState();
@@ -48,6 +51,11 @@ class LiveIdeasView extends StatefulWidget {
 class _LiveIdeasViewState extends State<LiveIdeasView> {
   final Map<String, QuoteSnapshot> _quotes = {};
   final Map<String, String> _errors = {};
+  final Map<String, BarSnapshot> _histories = {};
+  final Map<String, String> _historyErrors = {};
+  String? _loadingHistory;
+  DateTime? _lastRequestAt;
+  Duration _requestSpacing = const Duration(seconds: 11);
   int _generation = 0;
   bool _loading = false;
   final Map<String, AssistantExplanation> _explanations = {};
@@ -57,6 +65,7 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
   final Map<String, IndicatorSnapshot> _indicators = {};
   final Map<String, String> _indicatorErrors = {};
   final Set<String> _loadingIndicators = {};
+  final Set<String> _expandedTickers = {};
 
   @override
   void initState() {
@@ -92,41 +101,98 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
       _loading = true;
       _quotes.clear();
       _errors.clear();
+      _histories.clear();
+      _historyErrors.clear();
+      _loadingHistory = null;
       _indicators.clear();
       _indicatorErrors.clear();
       _loadingIndicators.clear();
       _clearAnalysis();
     });
-    var twelveData = false;
     for (var index = 0; index < temporaryStocks.length; index++) {
-      if (twelveData && index > 0) {
-        // Stay below the server's conservative seven-credit rolling minute.
-        await Future<void>.delayed(const Duration(seconds: 11));
-      }
-      if (!mounted || generation != _generation) return;
       final ticker = temporaryStocks[index].$1;
+      if (!await _paceRequest(generation) ||
+          !mounted ||
+          generation != _generation) {
+        return;
+      }
       try {
         final result = await service.quote(backendUrl, ticker);
         if (!mounted || generation != _generation) return;
-        twelveData = result.quote.provider == MarketDataProvider.twelveData;
+        _setRequestSpacing(result.quote.provider);
         setState(() => _quotes[ticker] = result);
       } on LocalMarketDataException catch (error) {
         if (!mounted || generation != _generation) return;
         setState(() => _errors[ticker] = error.message);
         // A quota or configuration failure should not trigger nine more calls.
-        if (error.message != 'No market data is available for this ticker.') {
-          setState(() {
-            for (final stock in temporaryStocks.skip(index + 1)) {
-              _errors[stock.$1] = 'Not requested: ${error.message}';
-            }
-          });
+        if (error.statusCode != 404) {
+          _stopRequests(index, error.message);
           break;
         }
       }
+      setState(() => _loadingHistory = ticker);
+      if (!await _paceRequest(generation) ||
+          !mounted ||
+          generation != _generation) {
+        return;
+      }
+      try {
+        final result = await service.dailyBars(backendUrl, ticker);
+        if (!mounted || generation != _generation) return;
+        _setRequestSpacing(result.provider);
+        setState(() => _histories[ticker] = result);
+      } on LocalMarketDataException catch (error) {
+        if (!mounted || generation != _generation) return;
+        setState(() => _historyErrors[ticker] = error.message);
+        if (error.statusCode != 404) {
+          _stopRequests(index, error.message);
+          break;
+        }
+      } finally {
+        if (mounted && generation == _generation) {
+          setState(() => _loadingHistory = null);
+        }
+      }
+      // Present this card's completed quote/history before starting the next.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || generation != _generation) return;
     }
     if (mounted && generation == _generation) {
       setState(() => _loading = false);
     }
+  }
+
+  void _setRequestSpacing(MarketDataProvider provider) {
+    _requestSpacing = switch (provider) {
+      MarketDataProvider.alpaca => Duration.zero,
+      MarketDataProvider.schwab => const Duration(seconds: 7),
+      MarketDataProvider.twelveData => const Duration(seconds: 11),
+    };
+  }
+
+  Future<bool> _paceRequest(int generation) async {
+    if (!mounted || generation != _generation) return false;
+    final now = widget.requestClock ?? DateTime.now;
+    if (_lastRequestAt case final last?) {
+      final remaining = _requestSpacing - now().difference(last);
+      if (remaining > Duration.zero) await Future<void>.delayed(remaining);
+    }
+    if (!mounted || generation != _generation) return false;
+    _lastRequestAt = now();
+    return true;
+  }
+
+  void _stopRequests(int index, String message) {
+    setState(() {
+      _historyErrors.putIfAbsent(
+        temporaryStocks[index].$1,
+        () => 'Not requested: $message',
+      );
+      for (final stock in temporaryStocks.skip(index + 1)) {
+        _errors[stock.$1] = 'Not requested: $message';
+        _historyErrors[stock.$1] = 'Not requested: $message';
+      }
+    });
   }
 
   void _clearAnalysis() {
@@ -229,9 +295,13 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
           onPressed:
               _loading || _analyzing.isNotEmpty || _loadingIndicators.isNotEmpty
               ? null
-              : _load,
+              : () {
+                  if (!_loading) _load();
+                },
           icon: const Icon(Icons.refresh),
-          label: Text(_loading ? 'Loading quotes...' : 'Refresh quotes'),
+          label: Text(
+            _loading ? 'Loading cards...' : 'Refresh quotes & charts',
+          ),
         ),
         if (_loading) const LinearProgressIndicator(),
         if (stocks.isEmpty)
@@ -252,7 +322,11 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
               runSpacing: 16,
               children: [
                 for (final stock in stocks)
-                  SizedBox(width: width, child: _stockCard(context, stock)),
+                  SizedBox(
+                    key: ValueKey(stock.$1),
+                    width: width,
+                    child: _stockCard(context, stock),
+                  ),
               ],
             );
           },
@@ -267,12 +341,13 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
     final quote = snapshot?.quote;
     final error = _errors[ticker];
     final saved = widget.savedTickers.contains(ticker);
+    final expanded = _expandedTickers.contains(ticker);
     final theme = Theme.of(context);
     return Card(
       key: Key('idea_$ticker'),
       color: theme.colorScheme.surfaceContainerLow,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(16),
         side: BorderSide(color: theme.colorScheme.outlineVariant),
       ),
       child: Padding(
@@ -283,7 +358,48 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
             Row(
               children: [
                 Expanded(
-                  child: Text(ticker, style: theme.textTheme.titleLarge),
+                  child: Semantics(
+                    button: true,
+                    expanded: expanded,
+                    child: InkWell(
+                      key: Key('expand_$ticker'),
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () => setState(() {
+                        if (!_expandedTickers.add(ticker)) {
+                          _expandedTickers.remove(ticker);
+                        }
+                      }),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    ticker,
+                                    style: theme.textTheme.titleLarge,
+                                  ),
+                                  Text(stock.$2),
+                                ],
+                              ),
+                            ),
+                            Tooltip(
+                              message: expanded
+                                  ? 'Collapse $ticker details'
+                                  : 'Expand $ticker details',
+                              child: Icon(
+                                expanded
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
                 IconButton(
                   key: Key('save_$ticker'),
@@ -293,7 +409,6 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
                 ),
               ],
             ),
-            Text(stock.$2),
             const SizedBox(height: 10),
             if (quote != null) ...[
               Text(
@@ -301,7 +416,13 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
                     ? 'Last price unavailable'
                     : '\$${quote.lastPrice!.toStringAsFixed(4)}',
                 key: Key('price_$ticker'),
-                style: theme.textTheme.headlineSmall,
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                'Latest available price',
+                style: theme.textTheme.labelMedium,
               ),
               Text('${quote.provider.name} / ${quote.feed.name}'),
               Text(
@@ -310,110 +431,11 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
               Text(
                 'Freshness: ${quote.freshnessAt(now: DateTime.now().toUtc(), maximumAge: const Duration(minutes: 1)).name}',
               ),
-              ExpansionTile(
-                key: Key('details_$ticker'),
-                tilePadding: EdgeInsets.zero,
-                title: const Text('Quote details & coverage'),
-                children: [
-                  Text(
-                    'Bid: ${_price(quote.bidPrice)} / Ask: ${_price(quote.askPrice)}',
-                  ),
-                  Text(
-                    'Quote time (UTC): ${quote.quoteAt?.toIso8601String() ?? 'Unavailable'}',
-                  ),
-                  Text(
-                    'Retrieved (UTC): ${quote.retrievedAt.toIso8601String()}',
-                  ),
-                  Text('Freshness at retrieval: ${snapshot!.freshness.name}'),
-                  Text(marketCoverage(quote.provider)),
-                ],
-              ),
-              OutlinedButton.icon(
-                key: Key('indicators_$ticker'),
-                onPressed:
-                    _loading ||
-                        _loadingIndicators.isNotEmpty ||
-                        _analyzing.isNotEmpty
-                    ? null
-                    : () => _loadIndicators(ticker),
-                icon: const Icon(Icons.calculate_outlined),
-                label: Text(
-                  _loadingIndicators.contains(ticker)
-                      ? 'Calculating indicators...'
-                      : 'Calculate daily indicators',
-                ),
-              ),
-              if (_indicatorErrors[ticker] case final indicatorError?)
-                Text(
-                  indicatorError,
-                  key: Key('indicator_error_$ticker'),
-                  style: TextStyle(color: theme.colorScheme.error),
-                ),
-              if (_indicators[ticker] case final indicators?)
-                _indicatorDetails(ticker, indicators),
-              if (widget.assistantService != null)
-                OutlinedButton.icon(
-                  key: Key('research_ai_$ticker'),
-                  onPressed:
-                      _analyzing.isNotEmpty ||
-                          _loading ||
-                          _loadingIndicators.isNotEmpty
-                      ? null
-                      : () => _explain(ticker, research: true),
-                  icon: const Icon(Icons.manage_search),
-                  label: const Text('Research with local tools'),
-                ),
-              if (widget.assistantService != null)
-                OutlinedButton.icon(
-                  key: Key('ask_ai_$ticker'),
-                  onPressed:
-                      _analyzing.isNotEmpty ||
-                          _loading ||
-                          _loadingIndicators.isNotEmpty
-                      ? null
-                      : () => _explain(ticker),
-                  icon: const Icon(Icons.auto_awesome_outlined),
-                  label: Text(
-                    _analyzing.contains(ticker) ? 'Analyzing...' : 'Ask AI',
-                  ),
-                ),
-              if (_analysisErrors[ticker] case final error?)
-                Text(
-                  error,
-                  key: Key('analysis_error_$ticker'),
-                  style: TextStyle(color: theme.colorScheme.error),
-                ),
-              if (_explanations[ticker] case final explanation?)
-                ExpansionTile(
-                  key: Key('analysis_$ticker'),
-                  initiallyExpanded: true,
-                  tilePadding: EdgeInsets.zero,
-                  title: Text('${explanation.provider} / ${explanation.model}'),
-                  subtitle: const Text('AI explanation - verify independently'),
-                  children: [
-                    SelectableText(explanation.text),
-                    if (explanation.toolsUsed.isNotEmpty)
-                      Text('Tools used: ${explanation.toolsUsed.join(', ')}'),
-                    for (final limitation in explanation.limitations)
-                      Text(limitation),
-                    for (final source in explanation.sources)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(source.title),
-                            Text(
-                              'Source date: ${source.publishedAt ?? 'Unavailable'}',
-                            ),
-                            Text(
-                              'Retrieved (UTC): ${source.retrievedAt.toIso8601String()}',
-                            ),
-                            SelectableText(source.url.toString()),
-                          ],
-                        ),
-                      ),
-                  ],
+              if (quote.lastTradeAt != null &&
+                  DateTime.now().toUtc().difference(quote.lastTradeAt!) >
+                      const Duration(minutes: 1))
+                const Text(
+                  'Last trade is stale; a newer bid/ask does not refresh its price.',
                 ),
             ] else
               Text(
@@ -423,6 +445,212 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
                     ? null
                     : TextStyle(color: theme.colorScheme.error),
               ),
+            const SizedBox(height: 16),
+            const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _UnavailableMetric(label: 'Entry')),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _UnavailableMetric(
+                    label: 'First Target',
+                    detail: 'Return: Unavailable',
+                  ),
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: _UnavailableMetric(
+                    label: 'Extended Target',
+                    detail: 'Return: Unavailable',
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Trade levels and returns unavailable — deterministic plan engine '
+              'and strategy configuration not implemented.',
+              style: theme.textTheme.bodySmall,
+            ),
+            DailyCandlePresentation(
+              key: Key('daily_history_$ticker'),
+              symbol: ticker,
+              snapshot: _histories[ticker],
+              error: _historyErrors[ticker],
+              loading: _loadingHistory == ticker,
+            ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 220),
+              alignment: Alignment.topCenter,
+              child: expanded
+                  ? Column(
+                      key: Key('expanded_$ticker'),
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Divider(height: 28),
+                        const Wrap(
+                          spacing: 20,
+                          runSpacing: 12,
+                          children: [
+                            _UnavailableMetric(label: 'Stop-loss'),
+                            _UnavailableMetric(label: 'Risk'),
+                            _UnavailableMetric(label: 'Risk / reward'),
+                            _UnavailableMetric(label: 'Position size'),
+                            _UnavailableMetric(label: 'Trade status'),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Stop, risk, risk/reward, position and status require '
+                          'a deterministic plan and validated sizing inputs. '
+                          'No trade state has been assigned.',
+                        ),
+                        const SizedBox(height: 12),
+                        const _UnavailableMetric(
+                          label: 'Daily change',
+                          detail: 'Prior regular-session close not supplied.',
+                        ),
+                        const SizedBox(height: 12),
+                        const _UnavailableMetric(
+                          label: 'AI direction / confidence',
+                          detail:
+                              'No forecast model. Explanations are not forecasts.',
+                        ),
+                        const SizedBox(height: 12),
+                        if (quote != null) ...[
+                          ExpansionTile(
+                            key: Key('details_$ticker'),
+                            tilePadding: EdgeInsets.zero,
+                            title: const Text('Quote details & coverage'),
+                            children: [
+                              Text(
+                                'Bid: ${_price(quote.bidPrice)} / Ask: ${_price(quote.askPrice)}',
+                              ),
+                              Text(
+                                'Quote time (UTC): ${quote.quoteAt?.toIso8601String() ?? 'Unavailable'}',
+                              ),
+                              Text(
+                                'Retrieved (UTC): ${quote.retrievedAt.toIso8601String()}',
+                              ),
+                              Text(
+                                'Freshness at retrieval: ${snapshot!.freshness.name}',
+                              ),
+                              Text(marketCoverage(quote.provider)),
+                              if (quote.provider == MarketDataProvider.schwab)
+                                Text(
+                                  'Provider realtime: ${quote.realtime ?? 'unknown'} · '
+                                  'quote type: ${quote.quoteType ?? 'unknown'} · '
+                                  'total volume (includes pre/post): ${quote.totalVolume ?? 'unavailable'}',
+                                ),
+                            ],
+                          ),
+                          OutlinedButton.icon(
+                            key: Key('indicators_$ticker'),
+                            onPressed:
+                                _loading ||
+                                    _loadingIndicators.isNotEmpty ||
+                                    _analyzing.isNotEmpty
+                                ? null
+                                : () => _loadIndicators(ticker),
+                            icon: const Icon(Icons.calculate_outlined),
+                            label: Text(
+                              _loadingIndicators.contains(ticker)
+                                  ? 'Calculating indicators...'
+                                  : 'Calculate daily indicators',
+                            ),
+                          ),
+                          if (_indicatorErrors[ticker]
+                              case final indicatorError?)
+                            Text(
+                              indicatorError,
+                              key: Key('indicator_error_$ticker'),
+                              style: TextStyle(color: theme.colorScheme.error),
+                            ),
+                          if (_indicators[ticker] case final indicators?)
+                            _indicatorDetails(ticker, indicators),
+                          if (widget.assistantService != null)
+                            OutlinedButton.icon(
+                              key: Key('research_ai_$ticker'),
+                              onPressed:
+                                  _analyzing.isNotEmpty ||
+                                      _loading ||
+                                      _loadingIndicators.isNotEmpty
+                                  ? null
+                                  : () => _explain(ticker, research: true),
+                              icon: const Icon(Icons.manage_search),
+                              label: const Text('Research with local tools'),
+                            ),
+                          if (widget.assistantService != null)
+                            OutlinedButton.icon(
+                              key: Key('ask_ai_$ticker'),
+                              onPressed:
+                                  _analyzing.isNotEmpty ||
+                                      _loading ||
+                                      _loadingIndicators.isNotEmpty
+                                  ? null
+                                  : () => _explain(ticker),
+                              icon: const Icon(Icons.auto_awesome_outlined),
+                              label: Text(
+                                _analyzing.contains(ticker)
+                                    ? 'Analyzing...'
+                                    : 'Ask AI',
+                              ),
+                            ),
+                          if (_analysisErrors[ticker] case final error?)
+                            Text(
+                              error,
+                              key: Key('analysis_error_$ticker'),
+                              style: TextStyle(color: theme.colorScheme.error),
+                            ),
+                          if (_explanations[ticker] case final explanation?)
+                            ExpansionTile(
+                              key: Key('analysis_$ticker'),
+                              initiallyExpanded: true,
+                              tilePadding: EdgeInsets.zero,
+                              title: Text(
+                                '${explanation.provider} / ${explanation.model}',
+                              ),
+                              subtitle: const Text(
+                                'AI explanation - verify independently',
+                              ),
+                              children: [
+                                SelectableText(explanation.text),
+                                if (explanation.toolsUsed.isNotEmpty)
+                                  Text(
+                                    'Tools used: ${explanation.toolsUsed.join(', ')}',
+                                  ),
+                                for (final limitation
+                                    in explanation.limitations)
+                                  Text(limitation),
+                                for (final source in explanation.sources)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 8),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(source.title),
+                                        if (source.kind == 'webSearch')
+                                          const Text(
+                                            'DuckDuckGo search snippet — page not fetched or verified',
+                                          ),
+                                        Text(
+                                          'Source date: ${source.publishedAt ?? 'Unavailable'}',
+                                        ),
+                                        Text(
+                                          'Retrieved (UTC): ${source.retrievedAt.toIso8601String()}',
+                                        ),
+                                        SelectableText(source.url.toString()),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                        ],
+                      ],
+                    )
+                  : const SizedBox(width: double.infinity),
+            ),
           ],
         ),
       ),
@@ -474,6 +702,36 @@ class _LiveIdeasViewState extends State<LiveIdeasView> {
 
 String _price(double? value) =>
     value == null ? 'Unavailable' : '\$${value.toStringAsFixed(4)}';
+
+class _UnavailableMetric extends StatelessWidget {
+  const _UnavailableMetric({required this.label, this.detail});
+
+  final String label;
+  final String? detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        Text(
+          'Unavailable',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        if (detail != null) Text(detail!, style: theme.textTheme.bodySmall),
+      ],
+    );
+  }
+}
 
 String _indicatorLabel(String key) => switch (key) {
   'sessionColors' => 'Green / red / flat',

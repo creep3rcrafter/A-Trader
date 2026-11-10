@@ -7,8 +7,9 @@ import 'market_data.dart';
 import 'indicator_snapshot.dart';
 
 class LocalMarketDataException implements Exception {
-  const LocalMarketDataException(this.message);
+  const LocalMarketDataException(this.message, {this.statusCode});
   final String message;
+  final int? statusCode;
 }
 
 String normalizeMarketSymbol(String input) {
@@ -27,7 +28,8 @@ String marketCoverage(MarketDataProvider provider) => switch (provider) {
   MarketDataProvider.twelveData =>
     'US realtime equity coverage is partial (about 5% volume), not consolidated. '
         'Daily volume completes after midnight ET on the next trading day. OTC unavailable.',
-  MarketDataProvider.schwab => 'Coverage unverified; integration unavailable.',
+  MarketDataProvider.schwab =>
+    'Schwab equity REST; realtime/quoteType are source metadata, not verified SIP entitlement. Daily adjustment/timezone unknown; indicators unavailable.',
 };
 
 class QuoteSnapshot {
@@ -74,6 +76,19 @@ class LocalMarketDataService {
       final feed = _enum(json['feed'], MarketDataFeed.values);
       _supportedSource(provider, feed, bars: false);
       _identity(data, symbol, provider, feed);
+      if (provider == MarketDataProvider.schwab &&
+          ((data['realtime'] != null && data['realtime'] is! bool) ||
+              (data['quoteType'] != null && data['quoteType'] is! String) ||
+              (data['totalVolume'] != null &&
+                  (data['totalVolume'] is! int ||
+                      (data['totalVolume'] as int) < 0)))) {
+        throw const FormatException();
+      }
+      if (provider == MarketDataProvider.schwab &&
+          data['quoteType'] is String &&
+          !RegExp(r'^[A-Z_]{1,32}$').hasMatch(data['quoteType'] as String)) {
+        throw const FormatException();
+      }
       final quote = MarketQuote(
         symbol: symbol,
         provider: provider,
@@ -84,6 +99,15 @@ class LocalMarketDataService {
         askPrice: _optionalNumber(data, 'askPrice'),
         lastTradeAt: _optionalTimestamp(data, 'lastTradeAt'),
         quoteAt: _optionalTimestamp(data, 'quoteAt'),
+        realtime: provider == MarketDataProvider.schwab
+            ? data['realtime'] as bool?
+            : null,
+        quoteType: provider == MarketDataProvider.schwab
+            ? data['quoteType'] as String?
+            : null,
+        totalVolume: provider == MarketDataProvider.schwab
+            ? data['totalVolume'] as int?
+            : null,
       );
       if ((quote.lastPrice != null && quote.lastTradeAt == null) ||
           ((quote.bidPrice != null || quote.askPrice != null) &&
@@ -95,10 +119,24 @@ class LocalMarketDataService {
           quote.askPrice == null) {
         throw const FormatException();
       }
-      return QuoteSnapshot(
-        quote,
-        _enum(data['freshness'], MarketDataFreshness.values),
-      );
+      final freshness = _enum(data['freshness'], MarketDataFreshness.values);
+      if (provider == MarketDataProvider.schwab &&
+          (quote.sourceTimestamp.isAfter(quote.retrievedAt) ||
+              quote.retrievedAt.isAfter(DateTime.now().toUtc()) ||
+              (quote.bidPrice != null &&
+                  quote.askPrice != null &&
+                  quote.bidPrice! > quote.askPrice!) ||
+              (freshness == MarketDataFreshness.fresh &&
+                  quote.freshnessAt(
+                        now: quote.retrievedAt,
+                        maximumAge: const Duration(minutes: 1),
+                      ) !=
+                      MarketDataFreshness.fresh) ||
+              (freshness == MarketDataFreshness.delayed &&
+                  quote.realtime != false))) {
+        throw const FormatException();
+      }
+      return QuoteSnapshot(quote, freshness);
     });
   }
 
@@ -123,6 +161,11 @@ class LocalMarketDataService {
           json['count'] != data.length) {
         throw const FormatException();
       }
+      if (data.length > 120) {
+        throw const FormatException();
+      }
+      DateTime? previous;
+      String? previousDate;
       final bars = data
           .map((raw) {
             final bar = _object(raw);
@@ -136,24 +179,51 @@ class LocalMarketDataService {
                   bar['timestampSemantics'] != 'exchangeTradingDate') {
                 throw const FormatException();
               }
+            } else if (provider == MarketDataProvider.schwab) {
+              if (timezone != null ||
+                  (date != null && (date is! String || !_validDate(date))) ||
+                  bar['timestampSemantics'] !=
+                      (date == null ? 'utcDateProxy' : 'providerTradingDate')) {
+                throw const FormatException();
+              }
             } else if (date != null ||
                 timezone != null ||
                 bar['timestampSemantics'] != null) {
               throw const FormatException();
             }
             final timestamp = _timestamp(bar['timestamp']);
-            if (timestamp.isBefore(start) || timestamp.isAfter(end)) {
+            final retrievedAt = _timestamp(bar['retrievedAt']);
+            final day =
+                date as String? ?? timestamp.toIso8601String().substring(0, 10);
+            if (timestamp.isBefore(start) ||
+                timestamp.isAfter(end) ||
+                timestamp.isAfter(retrievedAt) ||
+                retrievedAt.isAfter(DateTime.now().toUtc()) ||
+                (previous != null && !timestamp.isAfter(previous!)) ||
+                (previousDate != null && day.compareTo(previousDate!) <= 0)) {
               throw const FormatException();
             }
+            if (provider == MarketDataProvider.schwab) {
+              if (day.compareTo(start.toIso8601String().substring(0, 10)) < 0 ||
+                  day.compareTo(end.toIso8601String().substring(0, 10)) > 0) {
+                throw const FormatException();
+              }
+            }
+            previous = timestamp;
+            previousDate = day;
             final adjustment = _enum(bar['adjustment'], PriceAdjustment.values);
-            if (adjustment != PriceAdjustment.raw) {
+            if (adjustment !=
+                (provider == MarketDataProvider.schwab
+                    ? PriceAdjustment.unknown
+                    : PriceAdjustment.raw)) {
               throw const FormatException();
             }
             if (!bar.containsKey('tradeCount') ||
                 !bar.containsKey('volumeWeightedPrice')) {
               throw const FormatException();
             }
-            if (date != null &&
+            if (provider != MarketDataProvider.schwab &&
+                date != null &&
                 (timestamp.toIso8601String().substring(0, 10) != date ||
                     timestamp.hour != 0 ||
                     timestamp.minute != 0 ||
@@ -178,8 +248,11 @@ class LocalMarketDataService {
               volumeWeightedPrice: bar['volumeWeightedPrice'] == null
                   ? null
                   : _number(bar['volumeWeightedPrice']),
-              tradingDate: date as String?,
+              tradingDate: date,
               exchangeTimezone: timezone as String?,
+              timestampSemantics: provider == MarketDataProvider.schwab
+                  ? bar['timestampSemantics'] as String
+                  : null,
             );
           })
           .toList(growable: false);
@@ -228,12 +301,13 @@ class LocalMarketDataService {
         401 => 'Session expired. Reload this page to sign in again.',
         403 => 'Local service denied this browser origin.',
         404 => 'No market data is available for this ticker.',
-        429 => 'Free market-data quota exhausted. Try again later.',
+        429 =>
+          'Market-data request limit or provider cooldown reached. Wait at least 60 seconds before refreshing.',
         503 =>
           'Selected provider unavailable. Check server credentials and terms.',
         _ =>
           'Local market-data request failed. Check the local service configuration.',
-      });
+      }, statusCode: response.statusCode);
     }
     if (json['coverage'] is! String || (json['coverage'] as String).isEmpty) {
       throw const LocalMarketDataException(
@@ -273,6 +347,10 @@ void _supportedSource(
           (bars
               ? MarketDataFeed.endOfDay
               : MarketDataFeed.twelveDataUsEquityUnverified)) {
+    return;
+  }
+  if (provider == MarketDataProvider.schwab &&
+      feed == MarketDataFeed.schwabEquity) {
     return;
   }
   throw const FormatException();

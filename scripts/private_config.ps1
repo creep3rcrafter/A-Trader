@@ -1,5 +1,9 @@
 $script:ATraderPrivateConfigPath = Join-Path (Split-Path -Parent $PSScriptRoot) '.local\private_config.dpapi'
 $script:ATraderAllowedConfigNames = @(
+    'SCHWAB_CLIENT_ID',
+    'SCHWAB_CLIENT_SECRET',
+    'SCHWAB_MARKET_DATA_TERMS_CONFIRMED',
+    'SCHWAB_LAN_DISPLAY_TERMS_CONFIRMED',
     'ALPACA_API_KEY_ID',
     'ALPACA_API_SECRET_KEY',
     'ALPACA_MARKET_DATA_TERMS_CONFIRMED',
@@ -76,11 +80,18 @@ function Import-ATraderPrivateConfig {
 function Protect-ATraderPrivatePath {
     param([Parameter(Mandatory = $true)][string]$Path)
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl = Get-Acl -LiteralPath $Path
+    $isDirectory = (Get-Item -LiteralPath $Path).PSIsContainer
+    # Build a DACL, not a copied audit descriptor requiring SeSecurityPrivilege.
+    # A fresh descriptor also removes any pre-existing explicit grants.
+    $acl = if ($isDirectory) {
+        New-Object Security.AccessControl.DirectorySecurity
+    } else {
+        New-Object Security.AccessControl.FileSecurity
+    }
     $acl.SetAccessRuleProtection($true, $false)
     $acl.SetOwner($identity)
     $rights = [Security.AccessControl.FileSystemRights]::FullControl
-    if ((Get-Item -LiteralPath $Path).PSIsContainer) {
+    if ($isDirectory) {
         $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
             [Security.AccessControl.InheritanceFlags]::ObjectInherit
         $propagation = [Security.AccessControl.PropagationFlags]::None
@@ -96,7 +107,11 @@ function Protect-ATraderPrivatePath {
         [Security.AccessControl.AccessControlType]::Allow
     )
     $acl.SetAccessRule($rule)
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    if ($isDirectory) {
+        [IO.Directory]::SetAccessControl($Path, $acl)
+    } else {
+        [IO.File]::SetAccessControl($Path, $acl)
+    }
 }
 
 function Get-ATraderFlutterExecutable {

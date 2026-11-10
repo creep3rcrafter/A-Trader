@@ -19,6 +19,8 @@ import '../backend/lib/research.dart';
 import '../backend/lib/sec_filings.dart';
 // ignore: avoid_relative_lib_imports
 import '../backend/lib/server.dart';
+// ignore: avoid_relative_lib_imports
+import '../backend/lib/web_search.dart';
 
 final fixtureNow = DateTime.utc(2026, 10, 12, 12);
 
@@ -98,12 +100,16 @@ class SyntheticResearchMarket implements MarketDataRepository {
   }
 }
 
-ResearchTools syntheticTools(SyntheticResearchMarket market) => ResearchTools(
+ResearchTools syntheticTools(
+  SyntheticResearchMarket market, {
+  WebSearchService? webSearch,
+}) => ResearchTools(
   marketData: market,
   provider: MarketDataProvider.alpaca,
   secFilings: SecFilingsClient(permitted: false, userAgent: ''),
   evidenceLabel: 'SYNTHETIC TEST FIXTURE - NOT LIVE MARKET DATA',
   clock: () => fixtureNow,
+  webSearch: webSearch,
 );
 
 List<MarketBar> syntheticIndicatorHistory() {
@@ -161,6 +167,7 @@ ResearchService fixtureResearch({
   required Future<http.Response> Function(Map<String, dynamic>) respond,
   AssistantConfiguration? configuration,
   AssistantCallBudget? budget,
+  WebSearchService? webSearch,
 }) {
   final config = configuration ?? researchConfiguration();
   return ResearchService(
@@ -175,7 +182,7 @@ ResearchService fixtureResearch({
         return respond(jsonDecode(request.body) as Map<String, dynamic>);
       }),
     )!,
-    tools: syntheticTools(market),
+    tools: syntheticTools(market, webSearch: webSearch),
     callBudget: budget ?? AssistantCallBudget(configuration: config),
     clock: () => fixtureNow,
   );

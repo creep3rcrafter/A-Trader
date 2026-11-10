@@ -2,6 +2,50 @@
 
 Use `[x]` only after implementation and verification. Revisit provider facts and links before each integration.
 
+## Schwab local OAuth foundation (2026-11-05)
+
+- [x] Record user-confirmed Ready for Use Market Data app and exact callback `https://127.0.0.1:8766/oauth/schwab/callback`; preserve supplied schemas/PDFs.
+- [x] Private App Key/Secret prompts merge into current-user DPAPI configuration, with existing environment precedence and current-user-only ACLs.
+- [x] Explicit local certificate/browser consent, unique native PKCS12 HTTPS listener on IPv4 loopback only; no root trust/firewall changes or public HTTP OAuth route.
+- [x] Five-minute secure single-use state, strict callback validation, sanitized replies/errors and fixed Schwab HTTPS token requests without redirects/retries.
+- [x] DPAPI token read/atomic replacement, validated access expiry/margin, refresh coalescing/rotation and explicit reauthorization on invalid grants; no invented refresh lifetime/scope.
+- [x] Synthetic request/error/state tests plus actual Windows TLS and DPAPI/ACL/replacement roundtrips; no live provider call or browser consent during tests.
+- [x] Validation: 24 focused auth tests and 345 full regression tests passed (three optional live/model tests skipped); Flutter/backend analysis, PowerShell syntax, formatting/diff checks and IDE build verified.
+- [x] Operator reports exact successful private authorization/persistence message; community-backed HTTP contract is not an official token-spec verification.
+- [x] Implement Schwab read-only quote/bounded daily-history adapter, fixed HTTPS endpoints, explicit selection and separate personal/LAN/model permission gates; no streaming/accounts/orders. Inline frontend charts reuse the existing bars route.
+- [x] Preserve source realtime/quoteType/volume, unknown adjustment and provider-date/UTC-proxy provenance; refuse Schwab indicators before fetching history.
+- [x] Validation: 63 new adapter/contract fixtures plus Schwab card coverage; full suite 409 passed, three optional live/model tests skipped, zero failures. Flutter/backend analysis, PowerShell syntax, IDE build and release same-origin Web build/Wasm dry run passed.
+- [ ] Operator privately confirms personal/free and optional LAN rights, explicitly selects Schwab and runs bounded live quote/history smoke; no live data/entitlement verification is claimed by fixtures.
+
+## Expandable dashboard cards — current Phase 1 slice (2026-11-05)
+
+- [x] Responsive 16px bordered cards, real quote/timestamp/feed, watchlist company labels and equal Entry/First Target/Extended Target columns.
+- [x] Independently expandable accessible headers with AnimatedSize; preserve session expansion across refresh, saved filters and tabs.
+- [x] Explicit unavailable trade levels/returns/stop/risk/RR/sizing/status with missing deterministic-engine/configuration reasons; no invented trade rules or neutral default.
+- [x] Daily change unavailable without prior regular close; AI direction/confidence unavailable without a forecast; explanations/snippets remain unverified evidence.
+- [x] Keep manual indicator, research and Ask AI actions, provenance, concurrent-action disabling, stale guards and quota-aware quotes; expansion adds no requests.
+- [x] Widget coverage for independent state/refresh/navigation/save, unavailable fields and mobile/desktop dark/light layouts; update existing action tests to expand first.
+- [x] Validation: 36 focused widget tests and 321 full regression tests passed, zero failures, three optional live/model tests skipped; clean Flutter/backend analysis, formatting and diff checks, successful IDE build and same-origin Web build/Wasm dry run. These fixture tests do not verify live provider rights or forecast performance.
+- [ ] Implement deterministic plan engine/strategy configuration and validated sizing inputs.
+- [ ] Add verified prior regular-session close to the data contract before computing day change.
+- [x] Show automatic inline daily charts below each card's summary, before expanded details, using the existing bounded 30-calendar-day bars route. Remove chart button/dialog; preserve selectable OHLCV. No new providers, dependencies, intraday data, forecasts or implicit model/indicator calls.
+- [x] Complete and render each ticker's quote then history before the next ticker; pace both endpoints at seven seconds for Schwab and eleven seconds for Twelve Data. Preserve timing across refresh; invalidate stale waits/results; stop quota/configuration failures with explicit remaining-card states and preserve valid quotes when history is unavailable.
+- [x] Display price wicks/bodies and same-feed volume, exact selectable OHLCV, source/retrieval timestamps, adjustment and date-basis caveats; handle empty/error responses without fabricated data.
+- [ ] Add intraday/multi-timeframe chart support after separately verifying provider parameters, quotas and session semantics.
+- [ ] Add separately labelled experimental forecasts only with versioned immutable history, alignment tests and outcome evaluation; no numerical predictions now.
+- [x] Normalize supplied quote/history schemas and REST PDF daily parameter enums; keep separate live entitlement verification pending above.
+
+## Desktop status and daily chart verification (2026-11-10)
+
+- [x] Replace manual health button with immediate and 30-second non-overlapping health checks while Settings is open, including accessible checking/reachable/unreachable status and URL/disposal guards.
+- [x] Native Windows-only Start/Stop for a fixed loopback source-checkout backend; import private config server-side, stop only the app-owned process, clean up after abrupt app exit, preserve unrelated processes.
+- [x] Chart/control fixture tests, Flutter/backend analysis, Windows/Web builds and IDE build passed. PowerShell fixture integration verified actual controller ownership, explicit Stop, abrupt-owner-exit cleanup and inherited bind/port isolation without private configuration or market calls.
+- [x] Automatic inline chart follow-on: 139 targeted tests passed; Flutter/backend analysis, IDE build, Windows release build and same-origin Web build/Wasm dry run passed. Fixtures verify per-card quote/history order, ticker identity, collapsed rendering, paced shared request budgets, refresh timing, stale generations, errors and no implicit model actions.
+- [ ] Full regression suite green: current automatic-chart run has 456 passed, three optional skips and one existing Schwab fixture-clock failure (adapter fixed at November 5 versus history requested using the actual date). Do not interpret this run as all passing or as live provider/forecast verification.
+
+Historical phase records below document earlier increments; mock-era checks are
+not evidence of current trade plans, forecasts or performance.
+
 ## Phase 0 — Audit and research
 
 - [x] Inspect Flutter/Dart version, project structure, dependencies, current UI, tests, routing/state management, and VCS status.
@@ -16,7 +60,7 @@ Use `[x]` only after implementation and verification. Revisit provider facts and
 
 - [x] Implement a responsive dashboard with a settings gear at top right.
 - [x] Show ranked ideas with explicit mock status, ticker/company, mock last-known price/time, entry range, stop, horizon, and risk.
-- [x] Expand evidence, indicator summaries, and risks without showing large charts by default.
+- [x] Expand evidence, indicator summaries, and risks independently of the always-visible inline daily charts.
 - [x] Add mock “Ask GPT Why” with no network/API call.
 - [x] Save/unsave ideas; expose saved ideas, statuses, and clearly mock historical outcomes.
 - [x] Add portfolio, allocation, horizon, maximum idea count, favorites, theme selector, prompt editor, and prompt/input preview.
@@ -53,6 +97,19 @@ Use `[x]` only after implementation and verification. Revisit provider facts and
 - [ ] Verify provider data retention, display, and GPT-processing permissions before storing or forwarding market data.
 
 ## Phase 3 — News, social, company filings
+
+### Limited personal DuckDuckGo increment (2026-11-05)
+
+- [x] Add default-disabled, three-flag personal-use permission gates and explicit missing-runtime results; no request-time downloads, paid provider or alternate fallback.
+- [x] Inspect/pin upstream 0.7.0 and override its Chrome headers, automatic browser fallback and httpx 429 retry; expose only search through a fixed local stdio adapter.
+- [x] Enforce server-owned ticker/category queries, three bounded snippets, one attempt/minute, one in flight, ten/process and latched stop on provider blocks/errors; preserve existing model/tool budgets and all-batch validation.
+- [x] Return actual safe public HTTPS source links, backend retrieval timestamps and unknown publication dates; show narrowly typed DuckDuckGo snippet provenance in Flutter, with no source-page fetching.
+- [x] Verify deterministic transport/protocol/provider fixtures and the full model-result/backend/frontend response chain; verify permissions, missing runtime, blocks/no retries, tool/argument/budget and citation failures.
+- [x] One authorized live provider-only `MSFT` search returned usable links through the real plain-httpx stdio bridge. This is not a native LM Studio search-tool demonstration, permanent availability or rights verification.
+- [ ] Demonstrate the chosen local model requesting/receiving the optional search tool and producing a faithful interpretation; fixture model responses are not native-model evidence.
+- [ ] Establish any shared/public display or publisher reuse rights separately; personal-use setup does not establish them.
+
+**Final validation for this increment:** formatter clean; `flutter analyze --no-pub` and `dart analyze backend` report no issues; targeted search/research/frontend tests **82 passed, 3 skipped**; complete Flutter suite **312 passed, 3 skipped**; Python parser/transport/stdio fixtures **6 passed**; isolated runtime `pip check` clean; IDE build successful; `flutter build web --no-pub --dart-define=A_TRADER_SAME_ORIGIN=true` successful with Wasm dry run. The three ordinary-suite skips are the optional live search and two native local-model tests. The live provider search was run once separately (**1 passed**); native local-model search was not run. An early live-smoke selection failed to compile because a newly added import was misplaced; it was corrected before the single actual provider attempt. No remaining analyzer/build/test failures, new credentials, commit or push.
 
 ### Current bounded local-research increment
 

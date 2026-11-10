@@ -16,6 +16,12 @@ import '../lib/lan_data_policy.dart';
 import '../lib/research.dart';
 // ignore: avoid_relative_lib_imports
 import '../lib/sec_filings.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/web_search.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/schwab_oauth.dart';
+// ignore: avoid_relative_lib_imports
+import '../lib/schwab_market_data.dart';
 
 Future<void> main() async {
   final environment = Platform.environment;
@@ -45,6 +51,33 @@ Future<void> main() async {
         )
       : null;
   final twelveDataCredentialsPresent = _isPresent(twelveDataKey);
+  final schwabCredentialsPresent =
+      _isPresent(environment['SCHWAB_CLIENT_ID']) &&
+      _isPresent(environment['SCHWAB_CLIENT_SECRET']);
+  final schwabTermsConfirmed =
+      environment['SCHWAB_MARKET_DATA_TERMS_CONFIRMED'] == 'true';
+  final root = File.fromUri(Platform.script).parent.parent.parent.path;
+  final schwabTokenPresent = File(
+    '$root\\.local\\schwab\\tokens.dpapi',
+  ).existsSync();
+  final schwabClient =
+      selectedProvider == MarketDataProvider.schwab &&
+          Platform.isWindows &&
+          schwabCredentialsPresent &&
+          schwabTermsConfirmed &&
+          schwabTokenPresent &&
+          lanDataPolicy.permits(MarketDataProvider.schwab)
+      ? SchwabMarketDataClient(
+          oauth: SchwabOAuthClient(
+            clientId: environment['SCHWAB_CLIENT_ID']!,
+            clientSecret: environment['SCHWAB_CLIENT_SECRET']!,
+            store: WindowsSchwabTokenStore(
+              '$root\\scripts\\schwab_token_store.ps1',
+            ),
+            lockPath: '$root\\.local\\schwab\\oauth.lock',
+          ),
+        )
+      : null;
   final twelveDataClient =
       selectedProvider == MarketDataProvider.twelveData &&
           twelveDataCredentialsPresent &&
@@ -58,13 +91,15 @@ Future<void> main() async {
   final MarketDataRepository? marketDataClient = switch (selectedProvider) {
     MarketDataProvider.alpaca => alpacaClient,
     MarketDataProvider.twelveData => twelveDataClient,
-    MarketDataProvider.schwab => null,
+    MarketDataProvider.schwab => schwabClient,
   };
   final secFilings = SecFilingsClient(
     permitted: environment['A_TRADER_SEC_TERMS_CONFIRMED'] == 'true',
     userAgent: environment['SEC_USER_AGENT'] ?? '',
   );
+  final webSearch = WebSearchService.fromEnvironment(environment);
   final providerStatuses = <String, Object?>{
+    'duckDuckGo': webSearch.health,
     'alpaca': {
       'credentialsPresent': alpacaCredentialsPresent,
       'termsConfirmed': alpacaTermsConfirmed,
@@ -85,11 +120,21 @@ Future<void> main() async {
       'lanRightsConfirmed': lanDataPolicy.twelveDataRightsConfirmed,
     },
     'schwab': {
-      'credentialsPresent':
-          _isPresent(environment['SCHWAB_CLIENT_ID']) &&
-          _isPresent(environment['SCHWAB_CLIENT_SECRET']),
-      'enabled': false,
-      'integrationImplemented': false,
+      'credentialsPresent': schwabCredentialsPresent,
+      'authorizationStored': schwabTokenPresent,
+      'authorizationVerified': false,
+      'termsConfirmed': schwabTermsConfirmed,
+      'configured':
+          schwabCredentialsPresent &&
+          schwabTokenPresent &&
+          schwabTermsConfirmed,
+      'enabled': schwabClient != null,
+      'selected': selectedProvider == MarketDataProvider.schwab,
+      'integrationImplemented': true,
+      'lanDisplayTermsConfirmed': lanDataPolicy.schwabDisplayConfirmed,
+      'dailyAdjustment': 'unknown',
+      'dailyIndicatorsAvailable': false,
+      'ordersEnabled': false,
     },
     'alphaVantage': {
       'credentialsPresent': _isPresent(environment['ALPHA_VANTAGE_API_KEY']),
@@ -140,6 +185,7 @@ Future<void> main() async {
             provider: selectedProvider,
             secFilings: secFilings,
             indicatorService: indicatorService,
+            webSearch: webSearch.permitted ? webSearch : null,
           ),
         );
   final authenticationEnabled = environment['A_TRADER_AUTH_ENABLED'] == 'true';
@@ -187,6 +233,13 @@ Future<void> main() async {
     stdout.writeln(
       'Provider calls are disabled until Alpaca market-data terms are reviewed.',
     );
+  } else if (selectedProvider == MarketDataProvider.schwab &&
+      schwabClient == null) {
+    stdout.writeln(
+      'Schwab disabled: Windows private OAuth, explicit personal/free usage '
+      'confirmation and applicable LAN display rights are required. '
+      'Run scripts\\setup_schwab_market_data.ps1 privately. No fallback.',
+    );
   }
   if (!lanDataPolicy.permits(selectedProvider)) {
     stdout.writeln(
@@ -220,8 +273,9 @@ MarketDataProvider _readProvider(String? value) {
   return switch (normalized) {
     null || '' || 'alpaca' => MarketDataProvider.alpaca,
     'twelvedata' || 'twelve_data' => MarketDataProvider.twelveData,
+    'schwab' => MarketDataProvider.schwab,
     _ => throw const FormatException(
-      'A_TRADER_MARKET_DATA_PROVIDER must be twelveData or alpaca.',
+      'A_TRADER_MARKET_DATA_PROVIDER must be twelveData, alpaca, or schwab.',
     ),
   };
 }
@@ -242,5 +296,5 @@ String _coverage(MarketDataProvider provider) => switch (provider) {
     'Supported US stocks and ETFs only; IEX single-exchange coverage; OTC unavailable.',
   MarketDataProvider.twelveData =>
     'US listed equity realtime is partial (about 5% market volume), not consolidated; daily history has complete US volume after midnight ET on the next trading day; OTC unavailable.',
-  MarketDataProvider.schwab => 'Schwab market-data integration is unavailable.',
+  MarketDataProvider.schwab => schwabCoverage,
 };

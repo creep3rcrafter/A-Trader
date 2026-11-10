@@ -1,5 +1,14 @@
 # A-Trader Project Roadmap
 
+**2026-11-05 read-only Schwab increment:** Operator-reported private OAuth now
+supports a fixture-tested, explicitly selected quote + bounded daily-history
+REST adapter. Personal/free usage and LAN display rights remain separate
+default-deny gates; no automatic switch or paid fallback. Adjustment/timezone
+unknown means Schwab indicators remain unavailable. Live data/entitlements are
+not yet verified. No accounts, orders or streaming are part of this slice.
+The later inline daily chart presentation reuses this bounded history contract.
+See `LOCAL_PROVIDER_SETUP.md` for private enablement and a bounded two-request smoke.
+
 **Reviewed:** 2026-10-10
 **Product:** Private microcap swing-trading research assistant. No broker orders are sent.
 
@@ -18,6 +27,94 @@ The starting repository was a Flutter 3.44.2 / Dart 3.12.2 application with a si
 Phase 1 keeps the application Flutter-only and dependency-free: responsive Material UI, a small in-memory app state, explicit mock records, and theme/prompt/settings controls. Later phases should introduce feature-focused UI, repositories and provider adapters only as integrations are actually built. The suggested long-term path is a local/self-hosted backend for secrets, scheduled research, provider quotas, and append-only history, with the Flutter app as the client. No backend or live provider is included in Phase 1.
 
 ## Milestones and acceptance criteria
+
+### Expandable dashboard cards — Phase 1 slice (2026-11-05)
+
+This is the current card redesign slice, not completion of the historical mock
+Phase 1 below or the full trading dashboard roadmap. Rounded responsive cards
+show actual latest-available quote/feed/time and static watchlist company names.
+Entry, First Target and Extended Target occupy equal columns. Trade levels,
+returns, stop, risk, risk/reward, sizing and status remain **Unavailable** because
+there is no deterministic plan engine/strategy configuration; settings alone
+do not establish a plan. Daily change requires a prior regular-session close,
+which the quote contract does not supply. AI direction/confidence is unavailable:
+existing explanations and search snippets are not forecasts.
+
+Each accessible header independently expands with animation; session expansion
+survives explicit refresh, Saved filtering and tab changes. Existing quote
+lifecycle/quota behavior and manual indicators/Ask AI/research remain unchanged.
+Expanding never fetches history or invokes a model. No dependency, polling,
+example trade prices, neutral signal or confidence score is added.
+
+**Verified:** 36 focused widget tests and all 321 regressions passed, with three
+optional live/model skips and zero failures. Formatting, Flutter/backend analysis,
+IDE build and same-origin Flutter Web build (including Wasm dry run) passed.
+Responsive fixtures cover 320/760/1024/1440px in both themes; no live provider/model
+request or account entitlement is established by this validation.
+
+**Deferred:** deterministic strategy/plan and sizing implementation; verified
+prior-close daily changes; intraday/multi-timeframe chart slice;
+separately labelled experimental forecasts with immutable versioned history,
+alignment tests and later outcome evaluation. No numerical forecast path,
+backtest, institutional ownership or prediction-accuracy claim is implemented.
+Schwab quote/history is now implemented from the supplied official schemas;
+live data-use entitlements remain a separate gate. Forecast alignment/version tests belong to that later
+history slice, not placeholder tests in this UI increment.
+
+### Historical daily chart foundation (2026-11-10)
+
+Every stock card now automatically shows daily candles below its Entry/targets
+summary, before optional expanded details; no chart button/dialog remains.
+One parent-owned queue finishes the ticker's quote then the existing
+`/api/v1/market-data/bars` request for the last 30 calendar days ending at today's
+UTC midnight, renders that card, then moves to the next ticker. Both requests are
+paced: seven seconds for Schwab (20 requests span at least 133 seconds), eleven
+for Twelve Data (at least 209 seconds), conservative eleven while unknown.
+Alpaca retains sequential loading under its existing 180-request/minute adapter
+safeguards. Refresh keeps the last request time; old generations cannot request
+after a URL/service change or disposal. Queued/loading/unavailable states are
+explicit; terminal errors stop remaining requests, while a ticker 404 permits
+continuation and failed history preserves valid quotes.
+Card expansion itself still makes no history/model request. Initial load,
+URL/service changes and explicit **Refresh quotes & charts** load both endpoints;
+no new API, provider fallback,
+subscription, dependency or automatic chart polling is introduced.
+
+The chart renders actual open/high/low/close candles and same-feed volume, with
+tap/hover selection and a keyboard-accessible candle selector. Exact OHLCV,
+source and retrieval timestamps, feed, adjustment and date-basis limitations
+remain visible. Returned observations are equally spaced; missing sessions are
+not invented or interpolated. The latest session can be absent, and the chart is
+not a freshness/coverage certification. Unknown Schwab adjustment/timezone does
+not prevent plotting observed prices, but still prevents verified economic
+return/indicator claims. Malformed, duplicate, unordered or future-retrieved
+series are rejected; empty/unavailable results show explicit messages.
+
+**Next chart increment, not implemented:** a separately labelled experimental
+forecast overlay. First define horizon in completed trading sessions, verified
+price/session comparability requirements, deterministic baseline and uncertainty
+method, immutable forecast snapshots (input cutoff, model/formula version and
+provider/adjustment metadata), and walk-forward evaluation against a no-change
+baseline. Never draw generated future OHLC as observed candles or label an
+uncalibrated range as a confidence interval. LM Studio may explain the evidence;
+it must not invent quantitative forecast paths. Intraday charts, persistent
+forecast storage, projections and prediction-accuracy claims remain absent.
+
+**Combined verification:** daily chart/control tests, Flutter/backend analyzers,
+Windows and Web builds, and IDE build passed. The PowerShell integration fixture
+verified real controller start/stop, abrupt app-exit cleanup and isolation from
+unrelated processes without reading private configuration. Full regression:
+448 passed, three optional skips, one existing Schwab fixture-clock failure
+(fixed November 5 adapter clock versus real-date history request). The full suite
+is therefore not green; no live data entitlement or forecast performance was
+verified by these fixtures.
+
+**Automatic inline follow-on verification:** 139 targeted tests passed. The full
+suite returned 456 passed, three optional skips and the same existing Schwab
+fixture-clock failure above. Flutter/backend analyzers, IDE build, Windows release
+build and same-origin Web build (including Wasm dry run) passed. These checks use
+fixture market data and make no live provider/model requests; the existing
+opt-in real model smoke remains skipped.
 
 ### Current incremental scope and next phase (2026-10-12)
 
@@ -86,6 +183,8 @@ Implement a dashboard of clearly labelled synthetic stock ideas; top-right setti
 ### Phase 2 — Free market-data layer
 
 **Tool-first research change:** The user has deferred Bright Data/SearXNG selection and requested an initial LM Studio tool-use experiment. Add only bounded read-only market-data and recent SEC-metadata tools first, showing actual executed tools, sources and missing capabilities. Broad stock discovery, article/social ingestion, factor-based ranking and validated trade-price calculations remain incomplete; no model claim substitutes for those features.
+
+**2026-11-05 limited personal-search increment:** User approved an optional DuckDuckGo snippet-only tool using the LM Studio plugin's underlying pinned 0.7.0 package behind A-Trader's own bounded loop. Three explicit permission flags, a fixed ticker/category query, three-result cap, one attempt/minute, ten/process and stop-on-block behavior replace unrestricted browsing. The app overrides upstream browser headers, auto impersonation fallback and 429 retries; no source-page fetching, credentials/private prompts in search, new paid provider, scoring or exhaustive-data promise. Safe source links and actual retrieval times are handler-authored; publication dates stay unknown and deterministic price/indicator tools remain authoritative. Deterministic fixtures cover the frontend/backend/model-result contract; one real provider-only `MSFT` smoke returned links. Native LM Studio search behavior and publisher/shared-display rights remain unverified. Setup and limitations are in `LOCAL_PROVIDER_SETUP.md`.
 
 **2026-10-12 local deployment increment:** Add user-bound encrypted server configuration, password-protected trusted-LAN hosting on port 3000, and explicit Ask AI quote explanations using LM Studio when no OpenAI key is configured. Shared-display and model-processing permissions remain separate default-deny gates. This does not complete screening, durable prompt/recommendation journaling, accuracy measurement or secure Internet deployment. LM Studio model listing was reachable; generation and cross-device access still require user configuration and verification.
 

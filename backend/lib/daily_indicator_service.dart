@@ -204,6 +204,11 @@ class DailyIndicatorService {
       return _unavailable('Symbol must be a normalized uppercase ticker.');
     }
     final repository = marketData;
+    if (provider == MarketDataProvider.schwab) {
+      return _unavailable(
+        'Schwab daily indicators unavailable: corporate-action adjustment and exchange-session timezone are unverified.',
+      );
+    }
     if (repository == null) {
       return _unavailable('Market data is disabled or unavailable.');
     }

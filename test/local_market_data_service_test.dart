@@ -100,6 +100,40 @@ void main() {
     expect((await service.dailyBars(localUrl, 'AAPL')).bars, isEmpty);
   });
 
+  for (final twelve in [false, true]) {
+    for (final invalid in ['duplicate', 'reversed', 'future retrieval']) {
+      test('chart rejects $invalid daily history ($twelve)', () async {
+        final body = barsFixture(twelve: twelve);
+        final data = body['data'] as List;
+        final first = Map<String, Object?>.from(data.single as Map);
+        if (invalid == 'future retrieval') {
+          first['retrievedAt'] = DateTime.now()
+              .toUtc()
+              .add(const Duration(days: 1))
+              .toIso8601String();
+          body['data'] = [first];
+        } else {
+          final second = Map<String, Object?>.from(first);
+          if (invalid == 'reversed') {
+            final day = DateTime.parse(
+              first['timestamp'] as String,
+            ).subtract(const Duration(days: 1));
+            second['timestamp'] = day.toIso8601String();
+            if (twelve) {
+              second['tradingDate'] = day.toIso8601String().substring(0, 10);
+            }
+          }
+          body['data'] = [first, second];
+          body['count'] = 2;
+        }
+        final service = LocalMarketDataService(
+          client: MockClient((_) async => fixtureResponse(body)),
+        );
+        await expectLater(service.dailyBars(localUrl, 'AAPL'), invalidResponse);
+      });
+    }
+  }
+
   test(
     'remote URLs, credentials and malformed tickers never issue requests',
     () async {
@@ -259,6 +293,31 @@ void main() {
       ),
     );
   });
+
+  test(
+    '429 uses generic cooldown wording and preserves status for queue policy',
+    () async {
+      final service = LocalMarketDataService(
+        client: MockClient(
+          (_) async => fixtureResponse({
+            'error': 'private provider/local limit details',
+          }, 429),
+        ),
+      );
+      await expectLater(
+        service.dailyBars(localUrl, 'AAPL'),
+        throwsA(
+          isA<LocalMarketDataException>()
+              .having((error) => error.statusCode, 'status', 429)
+              .having(
+                (error) => error.message,
+                'safe generic cooldown',
+                'Market-data request limit or provider cooldown reached. Wait at least 60 seconds before refreshing.',
+              ),
+        ),
+      );
+    },
+  );
 
   for (final body in ['not-json secret-token', '[]', '{}', '{"error":{}}']) {
     test('malformed error shape is safe: $body', () async {
