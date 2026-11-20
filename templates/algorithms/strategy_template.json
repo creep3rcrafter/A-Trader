@@ -1,0 +1,59 @@
+{
+  "format": "atrader.algorithm",
+  "version": 1,
+  "kind": "rules",
+  "id": "template_sma",
+  "name": "Template: SMA distance",
+  "description": "Buy above a moving average; exit below it. Long positions only.",
+  "intervalMinutes": 1,
+  "warmupBars": 200,
+  "parameters": {
+    "lookback": {
+      "label": "Moving average lookback",
+      "unit": "bars",
+      "default": 20,
+      "min": 2,
+      "max": 200,
+      "round": true
+    },
+    "entryThreshold": {
+      "label": "Distance above average to enter",
+      "unit": "fraction",
+      "default": 0.005,
+      "min": 0,
+      "max": 0.1
+    },
+    "stopFraction": {
+      "label": "Protective stop distance",
+      "unit": "fraction",
+      "default": 0.02,
+      "min": 0.001,
+      "max": 0.1
+    }
+  },
+  "calculations": {
+    "average": "sma(close, lookback)",
+    "distance": "close / average - 1"
+  },
+  "rules": [
+    {
+      "when": "hasPosition && positionSide == 'long' && distance < 0",
+      "action": "sell",
+      "side": "long",
+      "positionEffect": "close",
+      "reason": "Close fell below the moving average."
+    },
+    {
+      "when": "!hasPosition && distance > entryThreshold",
+      "action": "buy",
+      "side": "long",
+      "positionEffect": "open",
+      "stop": "close * (1 - stopFraction)",
+      "reason": "Close is above the moving average by the entry threshold."
+    }
+  ],
+  "fallback": {
+    "action": "wait",
+    "reason": "No entry or exit condition matched."
+  }
+}

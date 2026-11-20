@@ -33,13 +33,6 @@ migrate_working_dir/
 /build/
 /coverage/
 
-# Local-only credentials and the separate GitHub checkout
-.env
-.env.*
-!.env.example
-/A Trader/
-/.local/
-
 # Symbolication related
 app.*.symbols
 

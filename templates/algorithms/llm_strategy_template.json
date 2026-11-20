@@ -1,0 +1,51 @@
+{
+  "format": "atrader.algorithm.draft",
+  "version": 1,
+  "kind": "llm",
+  "id": "template_llm",
+  "name": "Template: LLM decision",
+  "description": "Ask a local model for a long-only decision using completed candles.",
+  "intervalMinutes": 1,
+  "warmupBars": 60,
+  "parameters": {
+    "minimumConfidence": {
+      "label": "Minimum confidence for entry",
+      "unit": "probability",
+      "default": 0.7,
+      "min": 0.5,
+      "max": 0.99
+    },
+    "stopFraction": {
+      "label": "Protective stop distance",
+      "unit": "fraction",
+      "default": 0.02,
+      "min": 0.001,
+      "max": 0.1
+    }
+  },
+  "decision": {
+    "provider": "lm_studio",
+    "model": "REPLACE_WITH_YOUR_MODEL_ID",
+    "temperature": 0,
+    "inputs": {
+      "completedCandles": 60,
+      "includePosition": true,
+      "includeParameters": true
+    },
+    "prompt": "Use only the supplied completed candles and current position. Return one JSON object with action (buy, sell, or wait), confidence (a number from 0 to 1), and reason (a string). Consider a long entry when flat or an exit when holding a long. Choose wait if uncertain.",
+    "responseSchema": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "enum": ["buy", "sell", "wait"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reason": { "type": "string" }
+      },
+      "required": ["action", "confidence", "reason"],
+      "additionalProperties": false
+    },
+    "entryGuard": "!hasPosition && confidence >= minimumConfidence",
+    "exitGuard": "hasPosition && positionSide == 'long'",
+    "entryStop": "close * (1 - stopFraction)",
+    "onInvalidResponse": "wait"
+  }
+}
