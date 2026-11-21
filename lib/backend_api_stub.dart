@@ -7,6 +7,7 @@ class BackendApi {
 
   Future<void> startBackend() async =>
       throw UnsupportedError('Starting the backend is supported on Windows.');
+  Future<void> restartBackend() => startBackend();
 
   Future<Map<String, dynamic>> get(String path) async =>
       throw UnsupportedError('This platform has no local backend HTTP client.');

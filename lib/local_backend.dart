@@ -57,6 +57,7 @@ class LocalBackend {
     this.schwabApiFactory,
     this.researchCycleDelay = Duration.zero,
     this.autoCollectCandles = false,
+    this.requestShutdown,
     DateTime Function()? clock,
     DateTime Function()? historyClock,
   }) : _storage = secureStorage ?? SecureStorage(),
@@ -72,6 +73,7 @@ class LocalBackend {
   final SchwabApiFactory? schwabApiFactory;
   final Duration researchCycleDelay;
   final bool autoCollectCandles;
+  final void Function()? requestShutdown;
   final DateTime Function() _clock;
   final DateTime Function() _historyClock;
   final Directory? dataDirectory;
@@ -146,7 +148,7 @@ class LocalBackend {
   String _selectedRunId = 'run-1';
   static const _researchPreviewId = 'research-preview';
   _BackendRun? _researchPreview;
-  final List<Map<String, Object?>> _generationExports = [];
+  final List<Object> _generationExports = [];
   String? _researchSourceId;
   bool _viewingResearchPreview = false;
   String? _followResearchSourceId;
@@ -204,33 +206,37 @@ class LocalBackend {
   String _redirectUri = '';
   String _oauthMessage = '';
   OAuthCallbackServer? _callbackServer;
+  bool _shuttingDown = false;
+  bool _ready = false;
 
   Future<void> start({int port = 8787}) async {
     if (_server != null) return;
+    _shuttingDown = false;
     _port = port;
-    await _historyCache.initialize();
-    await _algorithms.restore([]);
-    await _loadSettings();
-    _schwab =
-        schwabApiFactory?.call(_storage, _handleQuote, _handleFeedState) ??
-        SchwabApi(
-          storage: _storage,
-          onQuote: _handleQuote,
-          onState: _handleFeedState,
-        );
+    // Claim the port before loading state so multiple frontends wait for the
+    // same process instead of starting more workers.
     _server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
     _server!.listen(_handleRequest);
-    unawaited(_loadCredentialStatus());
-    for (final run in _runs.values) {
-      if (run.savedEngineCheckpoints.isNotEmpty) _prepareRuntime(run);
-    }
-    _loadResearchSession(_selectedSavedRun);
-    if (_runs.values.any((run) => run.resumeOnConnection)) {
-      try {
-        await _schwab!.startStreaming(_subscriptionSymbols());
-      } catch (error) {
-        _lastError = 'Automatic Schwab reconnect could not start: $error';
+    try {
+      await _historyCache.initialize();
+      await _algorithms.restore([]);
+      await _loadSettings();
+      _schwab =
+          schwabApiFactory?.call(_storage, _handleQuote, _handleFeedState) ??
+          SchwabApi(
+            storage: _storage,
+            onQuote: _handleQuote,
+            onState: _handleFeedState,
+          );
+      for (final run in _runs.values) {
+        if (run.savedEngineCheckpoints.isNotEmpty) _prepareRuntime(run);
       }
+      _loadResearchSession(_selectedSavedRun);
+    } catch (_) {
+      await _server?.close(force: true);
+      _server = null;
+      await _algorithms.close();
+      rethrow;
     }
     _persistenceTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       // Historical jobs save at generation boundaries. There is no new data
@@ -252,6 +258,15 @@ class LocalBackend {
         if (!run.historicalMode) run.runtime?.checkFreshness();
       }
     });
+    _ready = true;
+    unawaited(_loadCredentialStatus());
+    if (_runs.values.any((run) => run.resumeOnConnection)) {
+      try {
+        await _schwab!.startStreaming(_subscriptionSymbols());
+      } catch (error) {
+        _lastError = 'Automatic Schwab reconnect could not start: $error';
+      }
+    }
   }
 
   Future<void> _collectCompletedCandleDays() async {
@@ -351,6 +366,7 @@ class LocalBackend {
   }
 
   Future<void> stop() async {
+    _shuttingDown = true;
     _research.stop();
     await _research.stopped;
     _persistenceTimer?.cancel();
@@ -362,10 +378,14 @@ class LocalBackend {
     }
     await _callbackServer?.close();
     await _schwab?.dispose();
-    await _server?.close(force: true);
-    _server = null;
     await _persist();
-    await _algorithms.close();
+    try {
+      await _algorithms.close();
+    } finally {
+      await _server?.close(force: true);
+      _server = null;
+      _ready = false;
+    }
   }
 
   Future<void> _handleRequest(HttpRequest request) async {
@@ -387,13 +407,40 @@ class LocalBackend {
       await request.response.close();
       return;
     }
+    if (_shuttingDown && request.method != 'GET') {
+      request.response.statusCode = HttpStatus.serviceUnavailable;
+      await _writeJson(request, {
+        'error': 'The backend is saving and stopping.',
+      });
+      return;
+    }
     try {
       final path = request.uri.path;
       if (request.method == 'GET' && path == '/api/health') {
         await _writeJson(request, {
           'service': 'atrader-backend',
           'apiVersion': 1,
+          'ready': _ready && !_shuttingDown,
+          if (_shuttingDown) 'stopping': true,
         });
+      } else if (!_ready) {
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        await _writeJson(request, {
+          'error': 'The backend is loading saved simulations.',
+        });
+      } else if (request.method == 'POST' &&
+          path == '/api/backend/shutdown' &&
+          requestShutdown != null) {
+        if (origin != null ||
+            request.headers.value('x-atrader-control') != 'restart') {
+          request.response.statusCode = HttpStatus.forbidden;
+          await _writeJson(request, {
+            'error': 'Use the desktop Restart backend control.',
+          });
+          return;
+        }
+        await _writeJson(request, {'stopping': true});
+        requestShutdown!();
       } else if (request.method == 'GET' && path == '/api/status') {
         await _writeJson(request, _status(_requestedRun(request)));
       } else if (request.method == 'GET' && path == '/api/algorithms') {
@@ -447,12 +494,12 @@ class LocalBackend {
           _importingAlgorithm = false;
         }
       } else if (request.method == 'GET' && path == '/api/snapshot') {
-        await _writeJson(request, _snapshot(_requestedRun(request)));
+        await _writeJson(request, await _snapshot(_requestedRun(request)));
       } else if (request.method == 'GET' &&
           path == '/api/evolution/population') {
         await _writeJson(
           request,
-          _populationResults(
+          await _populationResults(
             _requestedRun(request),
             request.uri.queryParameters,
           ),
@@ -466,10 +513,10 @@ class LocalBackend {
         }
         await _writeJson(
           request,
-          _variableChanges(_requestedRun(request), generation),
+          await _variableChanges(_requestedRun(request), generation),
         );
       } else if (request.method == 'GET' && path == '/api/export') {
-        await _writeJson(request, _exportData());
+        await _writeJson(request, await _exportData());
       } else if (request.method == 'GET' && path == '/api/runs') {
         await _writeJson(request, {
           'selectedRunId': _selectedRun.id,
@@ -1282,8 +1329,10 @@ class LocalBackend {
     return checkpoint;
   }
 
-  Map<String, Object?> _exportData() => buildRunDataExport(
-    {
+  Future<Map<String, Object?>> _exportData() async {
+    final sourceId = _researchSourceId;
+    final research = _research.status;
+    final state = await _checkpointArchives.unpackState({
       'schemaVersion': 2,
       'selectedRunId': _selectedRun.id,
       'savedAt': _clock().toUtc().toIso8601String(),
@@ -1293,12 +1342,20 @@ class LocalBackend {
       'training': _training.checkpoint(),
       'lmStudio': _lmSettings,
       'algorithms': _algorithms.definitions,
-    },
-    exportedAt: _clock().toUtc(),
-    source: 'running backend',
-    research: _research.status,
-    generations: List.of(_generationExports),
-  );
+    });
+    final source = (state['runs'] as List)
+        .cast<Map>()
+        .where((run) => run['id'] == sourceId)
+        .firstOrNull;
+    return buildRunDataExport(
+      state,
+      exportedAt: _clock().toUtc(),
+      source: 'running backend',
+      research: research,
+      generations: (source?['generationResults'] as List? ?? const [])
+          .cast<Map<String, Object?>>(),
+    );
+  }
 
   Map<String, Object?> _status([_BackendRun? run]) {
     final selected = run ?? _selectedRun;
@@ -1443,12 +1500,23 @@ class LocalBackend {
     };
   }
 
-  Map<String, Object?> _snapshot([_BackendRun? run]) {
+  Future<Map<String, Object?>> _snapshot([_BackendRun? run]) async {
     final selected = run ?? _selectedRun;
     final runtime = selected.runtime;
+    final status = _status(selected);
+    Map<String, Object?> changes;
+    try {
+      changes = await _variableChanges(selected);
+    } on FileSystemException catch (error) {
+      changes = {'error': 'Could not read archived generation results: $error'};
+    } on FormatException catch (error) {
+      changes = {
+        'error': 'Could not decode archived generation results: $error',
+      };
+    }
     return {
-      'status': _status(selected),
-      'variableChanges': _variableChanges(selected),
+      'status': status,
+      'variableChanges': changes,
       if (selected.id == _researchPreviewId)
         'previewEvents': _runEvents(selected),
       if (selected.generationEquity case final history?)
@@ -1528,21 +1596,55 @@ class LocalBackend {
     };
   }
 
-  Map<String, Object?> _variableChanges(_BackendRun run, [int? generation]) {
+  Future<Map<String, Object?>?> _generationAt(
+    List<Object> history,
+    int? generation,
+  ) async {
+    if (history.isEmpty) return null;
+    if (generation == null) return _checkpointArchives.read(history.last);
+    for (final entry in history) {
+      if (CheckpointArchives.generationNumber(entry) == generation) {
+        return _checkpointArchives.read(entry);
+      }
+    }
+    // Older manifests contain paths only. The index usually matches the
+    // generation, but verify it before returning a report.
+    final index = generation - 1;
+    if (index >= 0 &&
+        index < history.length &&
+        CheckpointArchives.generationNumber(history[index]) == null) {
+      final row = await _checkpointArchives.read(history[index]);
+      if (row['generation'] == generation) return row;
+    }
+    for (final (i, entry) in history.indexed) {
+      if (i == index || CheckpointArchives.generationNumber(entry) != null) {
+        continue;
+      }
+      final row = await _checkpointArchives.read(entry);
+      if (row['generation'] == generation) return row;
+    }
+    throw ArgumentError('Choose a completed generation.');
+  }
+
+  Future<Map<String, Object?>> _variableChanges(
+    _BackendRun run, [
+    int? generation,
+  ]) async {
     final source = run.id == _researchPreviewId
         ? _runs[_researchSourceId]
         : run;
     final history = source?.generationResults ?? const [];
-    final selected = generation == null
-        ? history.lastOrNull
-        : history.where((row) => row['generation'] == generation).firstOrNull;
+    final latest = await _generationAt(history, null);
+    final selected = generation == null || generation == latest?['generation']
+        ? latest
+        : await _generationAt(history, generation);
     if (generation != null && selected == null) {
       throw ArgumentError('Choose a completed generation.');
     }
     return {
       'sessionId': source?.researchSession?['sessionId'],
       'generation': selected?['generation'],
-      'latestGeneration': history.lastOrNull?['generation'] ?? 0,
+      'latestGeneration': latest?['generation'] ?? 0,
       'strategies': [
         for (final result
             in (selected?['tuningResults'] as List? ?? const []).cast<Map>())
@@ -1562,10 +1664,10 @@ class LocalBackend {
     };
   }
 
-  Map<String, Object?> _populationResults(
+  Future<Map<String, Object?>> _populationResults(
     _BackendRun run,
     Map<String, String> query,
-  ) {
+  ) async {
     final source = run.id == _researchPreviewId
         ? _runs[_researchSourceId]
         : run;
@@ -1575,9 +1677,10 @@ class LocalBackend {
     if (text != null && generation == null) {
       throw ArgumentError('Invalid generation.');
     }
-    final selected = generation == null
-        ? history.lastOrNull
-        : history.where((row) => row['generation'] == generation).firstOrNull;
+    final latest = await _generationAt(history, null);
+    final selected = generation == null || generation == latest?['generation']
+        ? latest
+        : await _generationAt(history, generation);
     if (generation != null && selected == null) {
       throw ArgumentError('Choose a completed generation.');
     }
@@ -1598,7 +1701,7 @@ class LocalBackend {
     return {
       'sessionId': source?.researchSession?['sessionId'],
       'generation': selected?['generation'],
-      'latestGeneration': history.lastOrNull?['generation'] ?? 0,
+      'latestGeneration': latest?['generation'] ?? 0,
       'strategies': [for (final r in results) r['label']],
       'strategy': strategy?['label'],
       'championId': strategy?['championId'],
@@ -2567,7 +2670,9 @@ class LocalBackend {
       for (final source in [file, backup]) {
         if (!await source.exists()) continue;
         try {
-          final decoded = jsonDecode(await source.readAsString());
+          final decoded = await Isolate.run(
+            () => jsonDecode(source.readAsStringSync()),
+          );
           if (decoded is! Map<String, dynamic> ||
               decoded['settings'] is! Map<String, dynamic>) {
             throw const FormatException('Saved state is not a run checkpoint.');
@@ -2588,7 +2693,7 @@ class LocalBackend {
       final recovered = <String, _BackendRun>{};
       if (savedRuns is List) {
         for (final value in savedRuns) {
-          final saved = await _checkpointArchives.unpackRun(
+          final saved = _checkpointArchives.referenceRun(
             value as Map<String, dynamic>,
           );
           final id = saved['id'] as String;
@@ -2657,10 +2762,11 @@ class LocalBackend {
     if (run.historicalMode) run.resumeOnConnection = false;
     run.researchSession = saved['researchSession'] as Map<String, dynamic>?;
     run.researchPreview = saved['researchPreviewData'] as Map<String, dynamic>?;
-    run.generationResults = (saved['generationResults'] as List? ?? [])
-        .cast<Map<String, dynamic>>();
+    run.generationResults = List<Object>.of(
+      (saved['generationResults'] as List? ?? []).cast<Object>(),
+    );
     run.trainingArchive.addAll(
-      (saved['trainingArchive'] as List? ?? []).cast<Map<String, dynamic>>(),
+      (saved['trainingArchive'] as List? ?? []).cast<Object>(),
     );
     for (final entry in (saved['strategyBests'] as Map? ?? const {}).entries) {
       run.strategyBests[entry.key as String] = Map<String, dynamic>.from(
@@ -2797,6 +2903,21 @@ class LocalBackend {
         rethrow;
       }
       if (await backup.exists()) await backup.delete();
+      for (final run in _runs.values) {
+        run.generationResults = run.generationResults
+            .map(_checkpointArchives.compact)
+            .toList();
+        for (var i = 0; i < run.trainingArchive.length; i++) {
+          run.trainingArchive[i] = _checkpointArchives.compact(
+            run.trainingArchive[i],
+          );
+        }
+      }
+      for (var i = 0; i < _generationExports.length; i++) {
+        _generationExports[i] = _checkpointArchives.compact(
+          _generationExports[i],
+        );
+      }
       return true;
     } catch (error) {
       _lastError = 'Simulator state could not be persisted: $error';
@@ -2830,9 +2951,9 @@ class _BackendRun {
   HistoricalReplay? replay;
   Map<String, dynamic>? researchSession;
   Map<String, dynamic>? researchPreview;
-  List<Map<String, Object?>> generationResults = [];
+  List<Object> generationResults = [];
   final strategyBests = <String, Map<String, dynamic>>{};
-  final trainingArchive = <Map<String, dynamic>>[];
+  final trainingArchive = <Object>[];
   Map<String, List<Map<String, num>>>? generationEquity;
   HistoricalRange? historicalRange;
   bool historicalMode = false;

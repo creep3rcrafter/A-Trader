@@ -9,7 +9,15 @@ Future<void> main(List<String> arguments) async {
       .where((value) => value != '--background')
       .toList();
   final port = positional.isEmpty ? 8787 : int.parse(positional.single);
-  final backend = LocalBackend(autoCollectCandles: true);
+  final stopped = Completer<void>();
+  void requestStop() {
+    if (!stopped.isCompleted) stopped.complete();
+  }
+
+  final backend = LocalBackend(
+    autoCollectCandles: true,
+    requestShutdown: requestStop,
+  );
   try {
     await backend.start(port: port);
   } catch (error) {
@@ -28,18 +36,15 @@ Future<void> main(List<String> arguments) async {
     );
     exit(1);
   }
-  // Detached launches have no console handles or console signal source.
-  if (background) return;
-  stdout.writeln('A-Trader backend listening on http://127.0.0.1:$port');
-  final stopped = Completer<void>();
-  void requestStop(ProcessSignal _) {
-    if (!stopped.isCompleted) stopped.complete();
-  }
-
-  ProcessSignal.sigint.watch().listen(requestStop);
-  if (!Platform.isWindows) {
-    ProcessSignal.sigterm.watch().listen(requestStop);
+  // Detached launches have no console signal source.
+  if (!background) {
+    stdout.writeln('A-Trader backend listening on http://127.0.0.1:$port');
+    ProcessSignal.sigint.watch().listen((_) => requestStop());
+    if (!Platform.isWindows) {
+      ProcessSignal.sigterm.watch().listen((_) => requestStop());
+    }
   }
   await stopped.future;
   await backend.stop();
+  exit(0);
 }

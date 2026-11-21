@@ -13,6 +13,7 @@ class BackendApi {
   Future<void> startBackend() async => throw UnsupportedError(
     'Start the backend from the Windows app or a terminal.',
   );
+  Future<void> restartBackend() => startBackend();
 
   Future<Map<String, dynamic>> get(String path) async {
     final request = await html.HttpRequest.request(

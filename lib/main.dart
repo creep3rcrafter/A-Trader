@@ -10,27 +10,33 @@ import 'algorithm_file_picker.dart';
 import 'algorithms/imported_definition.dart';
 import 'data_export.dart';
 import 'mountain_time.dart';
+import 'run_data_export.dart' show portfolioPerformance;
 import 'simulator.dart';
 import 'strategy_tuning.dart' show maxTuningGenerations, EvolutionSettings;
 
 part 'population_performance.dart';
+part 'dashboard_overview.dart';
 
 void main() => runApp(const MyApp());
 
 class MyApp extends StatefulWidget {
-  const MyApp({super.key});
+  const MyApp({super.key, this.autoStartBackend = true, this.backendApi});
+  final bool autoStartBackend;
+  final BackendApi? backendApi;
 
   @override
   State<MyApp> createState() => _MyAppState();
 }
 
 class _MyAppState extends State<MyApp> {
-  final _controller = DashboardController();
+  late final _controller = DashboardController(
+    api: widget.backendApi ?? const BackendApi(),
+  );
 
   @override
   void initState() {
     super.initState();
-    _controller.start();
+    _controller.start(autoStartBackend: widget.autoStartBackend);
   }
 
   @override
@@ -327,25 +333,48 @@ class DashboardController extends ChangeNotifier {
     return result;
   }
 
-  void start() {
-    unawaited(refresh());
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+  void start({bool autoStartBackend = false}) {
+    if (autoStartBackend && api.supportsBackendLaunch) {
+      unawaited(_connectBackend());
+    } else {
       unawaited(refresh());
+    }
+    _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(refresh(allowCachedPreview: true));
     });
   }
 
-  Future<void> refresh() {
+  Future<void> refresh({bool allowCachedPreview = false}) {
     if (_disposed || backendStarting || _changingRun) {
       return Future<void>.value();
     }
-    return _refreshInProgress ??= _refresh().whenComplete(() {
-      _refreshInProgress = null;
-    });
+    return _refreshInProgress ??=
+        _refresh(allowCachedPreview: allowCachedPreview).whenComplete(() {
+          _refreshInProgress = null;
+        });
   }
 
-  Future<void> _refresh() async {
+  Future<void> _refresh({bool allowCachedPreview = false}) async {
     try {
       final response = await api.get('/api/status');
+      if (_disposed) return;
+      final cached = snapshot['status'] as Map?;
+      final cachedResearch = cached?['research'] as Map?;
+      final research = response['research'] as Map?;
+      if (allowCachedPreview &&
+          backendConnected &&
+          response['workspaceMode'] == true &&
+          response['researchPreview'] == true &&
+          jsonEncode(response['algorithms']) == _algorithmCatalogue &&
+          cached?['runId'] == response['runId'] &&
+          research?['sessionId'] != null &&
+          research?['sessionId'] == cachedResearch?['sessionId'] &&
+          research?['cycles'] == cachedResearch?['cycles']) {
+        status = response;
+        lastUpdated = DateTime.now();
+        notifyListeners();
+        return;
+      }
       final runQuery = response['runId'] == null
           ? ''
           : '?runId=${Uri.encodeQueryComponent('${response['runId']}')}';
@@ -386,16 +415,23 @@ class DashboardController extends ChangeNotifier {
     }
   }
 
-  Future<void> startBackend() async {
-    if (_disposed || backendStarting || backendConnected) return;
+  Future<void> restartBackend() => _connectBackend(restart: true);
+
+  Future<void> _connectBackend({bool restart = false}) async {
+    if (_disposed || backendStarting) return;
     backendStarting = true;
+    if (restart) backendConnected = false;
     backendError = '';
     notifyListeners();
     try {
       final pendingRefresh = _refreshInProgress;
       if (pendingRefresh != null) await pendingRefresh;
       if (_disposed) return;
-      await api.startBackend();
+      if (restart) {
+        await api.restartBackend();
+      } else {
+        await api.startBackend();
+      }
       if (_disposed) return;
       backendStarting = false;
       await refresh();
@@ -602,7 +638,15 @@ class SimulatorHome extends StatelessWidget {
             const Text('A-Trader'),
             if (MediaQuery.sizeOf(context).width > 650) ...[
               const SizedBox(width: 12),
-              _ModePill(label: 'LIVE SIMULATION'),
+              _ModePill(
+                label:
+                    controller.status['runMode'] == 'historical' ||
+                        controller.isResearchPreview
+                    ? 'HISTORICAL'
+                    : controller.status['running'] == true
+                    ? 'LIVE'
+                    : 'SIMULATION',
+              ),
             ],
           ],
         ),
@@ -616,6 +660,14 @@ class SimulatorHome extends StatelessWidget {
           ),
           if (MediaQuery.sizeOf(context).width > 650)
             _FeedPill(status: controller.status),
+          if (controller.api.supportsBackendLaunch)
+            IconButton(
+              tooltip: 'Restart backend',
+              onPressed: controller.backendStarting
+                  ? null
+                  : controller.restartBackend,
+              icon: const Icon(Icons.restart_alt),
+            ),
           const SizedBox(width: 8),
           IconButton(
             tooltip: 'Settings',
@@ -633,10 +685,11 @@ class SimulatorHome extends StatelessWidget {
           if (controller.backendError.isNotEmpty || controller.backendStarting)
             _BackendNotice(
               message: controller.backendError,
-              onRetry: controller.backendStarting ? null : controller.refresh,
-              onStart: controller.api.supportsBackendLaunch
-                  ? controller.startBackend
-                  : null,
+              onRetry:
+                  controller.backendStarting ||
+                      controller.api.supportsBackendLaunch
+                  ? null
+                  : controller.refresh,
               starting: controller.backendStarting,
             ),
           Expanded(child: DashboardView(controller: controller)),
@@ -1352,9 +1405,10 @@ class _GenerationChangesState extends State<_GenerationChanges>
 }
 
 class _SimulationActivity extends StatelessWidget {
-  const _SimulationActivity({required this.status});
+  const _SimulationActivity({required this.status, this.compact = false});
 
   final Map<String, dynamic> status;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -1408,10 +1462,11 @@ class _SimulationActivity extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Simulation activity',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
+            if (!compact)
+              Text(
+                'Simulation activity',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
             if (showRun)
               _ActivityRow(
                 title: historical ? 'Historical replay' : 'Live simulation',
@@ -1597,6 +1652,17 @@ class _DashboardViewState extends State<DashboardView> {
             .whereType<Map<String, dynamic>>()
             .toList();
     final seriesColors = _portfolioColors(accounts);
+    if (widget.controller.workspaceMode) {
+      return _DashboardOverview(
+        controller: widget.controller,
+        accounts: accounts,
+        generationEquity: generationEquity,
+        colors: seriesColors,
+        buildFullMetrics: (context) => _metricsTable(context, accounts),
+        buildReadiness: (context) =>
+            _warmupPanel(context, widget.controller.status),
+      );
+    }
     final live = widget.controller.status['running'] == true;
     final selectedRun = (widget.controller.status['runs'] as List? ?? [])
         .whereType<Map>()
@@ -1647,8 +1713,6 @@ class _DashboardViewState extends State<DashboardView> {
           ),
         _SimulationActivity(status: widget.controller.status),
         _SimulationControls(controller: widget.controller),
-        if (widget.controller.workspaceMode)
-          PopulationPerformance(controller: widget.controller),
         if (widget.controller.status['strategyBests'] case final Map bests
             when bests.isNotEmpty)
           _StrategyBests(controller: widget.controller, bests: bests),
@@ -1972,8 +2036,7 @@ class _DashboardViewState extends State<DashboardView> {
               ),
             const SizedBox(height: 12),
             LayoutBuilder(
-              builder: (context, constraints) => SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
+              builder: (context, constraints) => SelectableHorizontalScrollView(
                 child: SizedBox(
                   width: math.max(1420, constraints.maxWidth),
                   child: Column(
@@ -2609,8 +2672,7 @@ class _OpenTrades extends StatelessWidget {
                 child: Text('No open strategy trades in this simulation.'),
               )
             else
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
+              SelectableHorizontalScrollView(
                 child: DataTable(
                   columnSpacing: 20,
                   horizontalMargin: 0,
@@ -4441,27 +4503,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     : 'Not connected to ${widget.controller.api.baseUrl}',
               ),
               const SizedBox(height: 8),
-              if (widget.controller.api.supportsBackendLaunch)
-                FilledButton.icon(
-                  onPressed:
-                      _busy ||
-                          widget.controller.backendStarting ||
-                          widget.controller.backendConnected
-                      ? null
-                      : widget.controller.startBackend,
-                  icon: const Icon(Icons.power_settings_new),
-                  label: Text(
-                    widget.controller.backendStarting
-                        ? 'Starting backend...'
-                        : 'Start backend',
-                  ),
-                ),
-              const SizedBox(height: 8),
               Text(
                 widget.controller.api.supportsBackendLaunch
-                    ? 'The backend keeps running when this window closes. '
-                          'Stop a simulation from Run setup before exiting '
-                          'if you do not want trading to continue.'
+                    ? 'The app connects automatically. Use Restart backend in the toolbar '
+                          'to restart it. Restarting saves completed training and stops the active session.'
                     : r'Start the backend from the Windows app or run '
                           r'dart run bin\server.dart in a separate terminal.',
               ),
@@ -5856,12 +5901,10 @@ class _BackendNotice extends StatelessWidget {
   const _BackendNotice({
     required this.message,
     required this.onRetry,
-    this.onStart,
     this.starting = false,
   });
   final String message;
   final VoidCallback? onRetry;
-  final VoidCallback? onStart;
   final bool starting;
 
   @override
@@ -5878,7 +5921,17 @@ class _BackendNotice extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (starting)
-                  const Text('Starting local backend...')
+                  const Row(
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 8),
+                      Text('Connecting to local backend…'),
+                    ],
+                  )
                 else
                   CopyableError(
                     'Local backend unavailable: $message',
@@ -5886,28 +5939,8 @@ class _BackendNotice extends StatelessWidget {
                       color: Theme.of(context).colorScheme.onErrorContainer,
                     ),
                   ),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    if (onStart != null)
-                      TextButton.icon(
-                        onPressed: starting ? null : onStart,
-                        icon: starting
-                            ? const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.power_settings_new),
-                        label: Text(
-                          starting ? 'Starting backend...' : 'Start backend',
-                        ),
-                      ),
-                    TextButton(onPressed: onRetry, child: const Text('Retry')),
-                  ],
-                ),
+                if (onRetry != null)
+                  TextButton(onPressed: onRetry, child: const Text('Retry')),
               ],
             ),
           ),

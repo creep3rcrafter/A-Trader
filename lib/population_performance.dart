@@ -303,8 +303,7 @@ class _PopulationPerformanceState extends State<PopulationPerformance>
             'Champion is retained when profit and win rate do not regress. Select any individual for its variables, full metrics and equity history.',
           ),
           if (rows.isNotEmpty)
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+            SelectableHorizontalScrollView(
               child: DataTable(
                 showCheckboxColumn: false,
                 sortColumnIndex: _sortColumn,

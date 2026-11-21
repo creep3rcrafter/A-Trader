@@ -12,15 +12,28 @@ class BackendApi {
 
   Future<void> startBackend() =>
       WindowsBackendLauncher(baseUrl: baseUrl).start();
+  Future<void> restartBackend() =>
+      WindowsBackendLauncher(baseUrl: baseUrl).restart();
 
   Future<Map<String, dynamic>> get(String path) async {
-    final client = HttpClient();
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
     try {
-      final request = await client.getUrl(Uri.parse('$baseUrl$path'));
-      final response = await request.close();
-      return await _decode(response);
+      final uri = Uri.parse('$baseUrl$path');
+      Future<Map<String, dynamic>> request() async {
+        final outgoing = await client.getUrl(uri);
+        return _decode(await outgoing.close());
+      }
+
+      if (const {
+        '/api/status',
+        '/api/snapshot',
+        '/api/log',
+      }.contains(uri.path)) {
+        return await request().timeout(const Duration(seconds: 8));
+      }
+      return await request();
     } finally {
-      client.close();
+      client.close(force: true);
     }
   }
 

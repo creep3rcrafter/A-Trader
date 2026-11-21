@@ -42,6 +42,24 @@ void main() {
         expect(await archives.packRun(run), packed);
         expect(await directory.list().length, 2);
         final reopened = CheckpointArchives(directory);
+        final references = reopened.referenceRun(packed);
+        final generation =
+            (references['generationResults'] as List).single
+                as CheckpointArchiveReference;
+        expect(generation.generation, 1);
+        expect(await reopened.packRun(references), packed);
+        expect(
+          await reopened.read(generation),
+          (run['generationResults'] as List).single,
+        );
+        final lazy = reopened.referenceRun({
+          'generationResultsFiles': ['123-999.json.gz'],
+        });
+        // Missing history is discovered on request, not when starting a run.
+        await expectLater(
+          reopened.read((lazy['generationResults'] as List).single as Object),
+          throwsA(isA<FileSystemException>()),
+        );
         expect(await reopened.unpackRun(packed), run);
         expect(
           await reopened.packRun(await reopened.unpackRun(packed)),

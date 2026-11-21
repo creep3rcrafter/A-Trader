@@ -26,7 +26,7 @@ void main() {
   testWidgets(
     'the application selects ordinary labels and includes dialog routes',
     (tester) async {
-      await tester.pumpWidget(const MyApp());
+      await tester.pumpWidget(const MyApp(autoStartBackend: false));
       await tester.pump();
       final area = find.byType(SelectionArea).first;
       expect(
@@ -77,7 +77,7 @@ void main() {
     'selecting Win rate with setup scrolled away keeps the dashboard responsive',
     (tester) async {
       final controller = DashboardController()
-        ..status = {'runId': 'one', 'workspaceMode': true, 'workspaceId': 'one'}
+        ..status = {'runId': 'one'}
         ..snapshot = {
           'accounts': [
             {
@@ -124,7 +124,11 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       tester
-          .state<SelectionAreaState>(find.byType(SelectionArea))
+          .state<SelectionAreaState>(
+            find
+                .ancestor(of: value, matching: find.byType(SelectionArea))
+                .first,
+          )
           .selectableRegion
           .selectAll(SelectionChangedCause.keyboard);
       await tester.pump();

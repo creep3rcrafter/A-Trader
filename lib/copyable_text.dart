@@ -11,6 +11,21 @@ Future<T?> showSelectableDialog<T>({
   builder: (context) => SelectionArea(child: builder(context)),
 );
 
+/// Select values within a table without sending selection updates to an
+/// offscreen nested scroll view elsewhere on the dashboard.
+class SelectableHorizontalScrollView extends StatelessWidget {
+  const SelectableHorizontalScrollView({required this.child, super.key});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => SelectionContainer.disabled(
+    child: SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SelectionArea(child: child),
+    ),
+  );
+}
+
 Future<void> copyAppText(BuildContext context, String text) async {
   try {
     await Clipboard.setData(ClipboardData(text: text));

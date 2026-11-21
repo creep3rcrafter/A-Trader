@@ -44,6 +44,9 @@ class _BackendApiFixture extends BackendApi {
   }
 
   @override
+  Future<void> restartBackend() => startBackend();
+
+  @override
   Future<Map<String, dynamic>> get(String path) async {
     if (!available) throw StateError('The backend is not running.');
     gets.add(path);
@@ -327,39 +330,46 @@ void main() {
   testWidgets('normal app entry renders the Live Simulation dashboard', (
     tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(const MyApp(autoStartBackend: false));
     await tester.pump();
 
     expect(find.text('A-Trader'), findsOneWidget);
-    expect(find.text('LIVE SIMULATION'), findsOneWidget);
+    expect(find.text('SIMULATION'), findsOneWidget);
     expect(find.text('Live dashboard'), findsOneWidget);
     expect(find.text('Starting cash'), findsOneWidget);
     expect(find.byTooltip('Export all run data'), findsOneWidget);
   });
 
-  testWidgets('offline Windows banner starts the backend once', (tester) async {
+  testWidgets('Windows autostart coalesces with the restart control', (
+    tester,
+  ) async {
     final api = _BackendApiFixture();
-    final controller = await _showOfflineApp(tester, api);
-
-    await tester.tap(find.text('Start backend'));
+    await tester.pumpWidget(MyApp(backendApi: api));
+    final controller = tester
+        .widget<SimulatorHome>(find.byType(SimulatorHome))
+        .controller;
     await tester.pump();
-    expect(find.text('Starting local backend...'), findsOneWidget);
+    expect(find.text('Connecting to local backend…'), findsOneWidget);
     expect(
       tester
-          .widget<TextButton>(
-            find.widgetWithText(TextButton, 'Starting backend...'),
+          .widget<IconButton>(
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is IconButton && widget.tooltip == 'Restart backend',
+            ),
           )
           .onPressed,
       isNull,
     );
-    await controller.startBackend();
+    await controller.restartBackend();
     expect(api.launches, 1);
 
     api.launch.complete();
     await tester.pumpAndSettle();
     expect(controller.backendConnected, isTrue);
     expect(controller.backendError, isEmpty);
-    expect(find.text('Start backend'), findsNothing);
+    expect(find.byTooltip('Restart backend'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('startup failure stays visible and allows another attempt', (
@@ -367,7 +377,7 @@ void main() {
   ) async {
     final api = _BackendApiFixture();
     final controller = await _showOfflineApp(tester, api);
-    await tester.tap(find.text('Start backend'));
+    await tester.tap(find.byTooltip('Restart backend'));
     await tester.pump();
     api.launch.completeError(StateError('Bundled backend is missing.'));
     await tester.pumpAndSettle();
@@ -377,35 +387,36 @@ void main() {
     expect(find.textContaining('Bundled backend is missing.'), findsOneWidget);
     expect(
       tester
-          .widget<TextButton>(find.widgetWithText(TextButton, 'Start backend'))
+          .widget<IconButton>(
+            find.byWidgetPredicate(
+              (widget) =>
+                  widget is IconButton && widget.tooltip == 'Restart backend',
+            ),
+          )
           .onPressed,
       isNotNull,
     );
   });
 
-  testWidgets('Settings launches the backend and updates its status', (
+  testWidgets('restart is available while connected and Settings reflects it', (
     tester,
   ) async {
     final api = _BackendApiFixture();
+    api.available = true;
     final controller = await _showOfflineApp(tester, api);
-    await tester.tap(find.byTooltip('Settings'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(
-      find.descendant(
-        of: find.byType(SettingsDialog),
-        matching: find.text('Start backend'),
-      ),
-    );
+    expect(controller.backendConnected, isTrue);
+    await tester.tap(find.byTooltip('Restart backend'));
     await tester.pump();
     expect(api.launches, 1);
     api.launch.complete();
     await tester.pumpAndSettle();
 
     expect(controller.backendConnected, isTrue);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
     expect(find.text('Connected to http://127.0.0.1:8787'), findsOneWidget);
     expect(
-      find.textContaining('keeps running when this window closes'),
+      find.textContaining('The app connects automatically.'),
       findsOneWidget,
     );
     expect(find.text('Client ID (App Key)'), findsOneWidget);
@@ -417,10 +428,10 @@ void main() {
     'platforms that cannot spawn processes show manual instructions',
     (tester) async {
       await _showOfflineApp(tester, _BackendApiFixture(canLaunch: false));
-      expect(find.text('Start backend'), findsNothing);
+      expect(find.byTooltip('Restart backend'), findsNothing);
       await tester.tap(find.byTooltip('Settings'));
       await tester.pumpAndSettle();
-      expect(find.text('Start backend'), findsNothing);
+      expect(find.byTooltip('Restart backend'), findsNothing);
       expect(find.textContaining(r'dart run bin\server.dart'), findsOneWidget);
     },
   );
@@ -430,11 +441,97 @@ void main() {
     () async {
       final api = _BackendApiFixture();
       final controller = DashboardController(api: api);
-      final startup = controller.startBackend();
+      final startup = controller.restartBackend();
       controller.dispose();
       api.launch.complete();
       await startup;
       expect(api.launches, 1);
+    },
+  );
+
+  testWidgets(
+    'workspace shows performance beside its chart and keeps details collapsed',
+    (tester) async {
+      tester.view.physicalSize = const Size(1440, 840);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final controller = DashboardController()
+        ..status = {
+          'workspaceMode': true,
+          'workspaceId': 'source',
+          'runId': 'preview',
+          'researchPreview': true,
+          'research': {
+            'running': true,
+            'continuous': true,
+            'phase': 'tuning',
+            'cycles': 4,
+            'progress': .42,
+          },
+        }
+        ..snapshot = {
+          'accounts': [
+            {
+              'label': 'Alpha',
+              'startingCash': 10000,
+              'equity': 10250,
+              'closedPnl': [45, -5],
+            },
+            {
+              'label': 'Beta',
+              'startingCash': 10000,
+              'equity': 11000,
+              'closedPnl': <int>[],
+            },
+          ],
+          'generationEquity': [
+            {
+              'label': 'Alpha',
+              'startingCash': 10000,
+              'history': [
+                {'generation': 1, 'value': 10000},
+                {'generation': 4, 'value': 10250},
+              ],
+            },
+          ],
+        };
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SelectionArea(child: DashboardView(controller: controller)),
+          ),
+        ),
+      );
+      expect(
+        find.text('Continuous research · Tuning strategies'),
+        findsOneWidget,
+      );
+      expect(find.text('50.0%'), findsOneWidget);
+      expect(find.text('—'), findsOneWidget);
+      expect(find.byType(CandleChart), findsNothing);
+      expect(
+        tester.getCenter(find.text('Portfolio equity')).dx,
+        lessThan(tester.getCenter(find.text('Portfolio performance')).dx),
+      );
+      expect(
+        tester.widget<EquityChart>(find.byType(EquityChart)).byGeneration,
+        isTrue,
+      );
+      await tester.tap(find.text('Drawdown'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<EquityChart>(find.byType(EquityChart)).drawdown,
+        isTrue,
+      );
+      await tester.tap(find.text('Win rate'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getTopLeft(find.text('Alpha')).dy,
+        lessThan(tester.getTopLeft(find.text('Beta')).dy),
+      );
+      expect(tester.takeException(), isNull);
     },
   );
 

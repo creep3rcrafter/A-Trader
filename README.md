@@ -35,8 +35,8 @@ no automatic collection happens while the backend is closed.
 Completed generation/session replays are stored once as compressed files in
 `%LOCALAPPDATA%\ATrader\state-archives`. `state.json` references these files;
 keep that folder with the checkpoint when backing up application data. The app
-restores them automatically, and **Export all run data** still produces one
-complete JSON file including those generations. Historical jobs checkpoint at
+loads archived results when you browse them, and **Export all run data** still
+produces one complete JSON file including those generations. Historical jobs checkpoint at
 generation boundaries instead of repeatedly rewriting all results while tuning.
 
 ## Requirements
@@ -71,12 +71,16 @@ flutter build windows
 .\build\windows\x64\runner\Release\atrader.exe
 ```
 
-Click **Start backend** in the offline banner, or open **Settings > Local
-backend > Start backend**. The app starts the bundled `atrader_backend.exe`
-without a terminal, waits for its health endpoint, and refreshes the dashboard.
-It reuses an already-running compatible backend rather than starting another.
-Starting the backend does not create a new simulation. A saved active run
-follows the existing automatic recovery and Schwab reconnection flow.
+The app connects to a compatible backend on launch or starts the bundled
+`atrader_backend.exe` automatically. The **Restart backend** icon in the toolbar
+requests a clean shutdown and starts the backend again. If the bundled backend
+is unresponsive, the launcher verifies the executable before stopping it.
+Use **Continue saved training** to resume historical evolution after a restart.
+
+On wide windows the dashboard places the selected equity, generation, or
+drawdown chart beside portfolio performance. Sort the table by clicking a
+metric heading. Expand **Market candles**, **Trades and decisions**, or
+**Detailed strategy metrics** for more detail.
 
 Keep the entire Release folder together when moving or distributing the app,
 including `atrader_backend.exe`. `flutter run -d windows` also builds and

@@ -67,6 +67,66 @@ void main() {
       },
     );
 
+    test(
+      'restart waits for the old backend to close before launching',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        final port = server.port;
+        await File('${directory.path}\\atrader_backend.exe').create();
+        var stopAcknowledged = false;
+        server.listen((request) async {
+          if (request.uri.path == '/api/backend/shutdown') {
+            expect(request.method, 'POST');
+            expect(request.headers.value('x-atrader-control'), 'restart');
+            request.response.write('{"stopping":true}');
+            await request.response.close();
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            stopAcknowledged = true;
+            await server.close(force: true);
+            return;
+          }
+          request.response.write(
+            '{"service":"atrader-backend","apiVersion":1}',
+          );
+          await request.response.close();
+        });
+        final service = launcher(
+          port,
+          startProcess: (_, _, _) async {
+            expect(stopAcknowledged, isTrue);
+            await _serveHealth(port: port);
+          },
+        );
+        await service.restart();
+      },
+    );
+
+    test('waits for a backend that is already loading saved data', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      var probes = 0;
+      server.listen((request) async {
+        request.response.write(
+          jsonEncode({
+            'service': 'atrader-backend',
+            'apiVersion': 1,
+            'ready': ++probes >= 3,
+          }),
+        );
+        await request.response.close();
+      });
+      var launches = 0;
+      await launcher(
+        server.port,
+        startProcess: (_, _, _) async {
+          launches++;
+        },
+      ).start();
+      expect(probes, 3);
+      expect(launches, 0);
+    });
+
     test('reports a missing bundled executable without spawning', () async {
       final port = await _unusedPort();
       var launches = 0;

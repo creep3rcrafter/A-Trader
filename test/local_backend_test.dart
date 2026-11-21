@@ -134,6 +134,7 @@ void main() {
     expect(jsonDecode(health.body), {
       'service': 'atrader-backend',
       'apiVersion': 1,
+      'ready': true,
     });
     final status = await _send(
       client,
