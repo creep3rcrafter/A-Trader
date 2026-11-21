@@ -153,6 +153,21 @@ class _BackendApiFixture extends BackendApi {
 class _RecordingCanvas implements Canvas {
   final List<(ui.Paragraph, Offset)> paragraphs = [];
   final List<(Offset, Offset, Color, double)> segments = [];
+  final List<Rect> rectangles = [];
+  final List<(Offset, double)> circles = [];
+  final List<Rect> clips = [];
+
+  @override
+  void drawRect(Rect rect, Paint paint) => rectangles.add(rect);
+  @override
+  void drawCircle(Offset center, double radius, Paint paint) =>
+      circles.add((center, radius));
+  @override
+  void clipRect(
+    Rect rect, {
+    ui.ClipOp clipOp = ui.ClipOp.intersect,
+    bool doAntiAlias = true,
+  }) => clips.add(rect);
 
   @override
   void drawLine(Offset p1, Offset p2, Paint paint) {
@@ -1320,7 +1335,12 @@ void main() {
           'runId': preview,
           'runName': previewName,
           'researchPreview': true,
-          'research': {...research, 'cycles': cycle},
+          'research': {
+            ...research,
+            'cycles': cycle,
+            'phase': 'tuning',
+            'progress': .25,
+          },
         },
         'previewEvents': [
           {'strategy': 'Alpha', 'kind': 'signal', 'reason': 'Cycle $cycle'},
@@ -1353,6 +1373,7 @@ void main() {
             'label': 'Alpha',
             'startingCash': 10000.0,
             'equity': equity,
+            'closedPnl': cycle == 1 ? [10, -5] : [10, 5],
             'history': [
               {'time': '2026-11-16T15:00:00Z', 'value': 10000.0},
               {'time': '2026-11-16T15:01:00Z', 'value': equity},
@@ -1386,9 +1407,36 @@ void main() {
       expect(api.gets, isNot(contains('/api/log?runId=$preview')));
       expect(find.text('1.00%'), findsWidgets);
 
+      final winRate = find.text('Win rate');
+      await tester.ensureVisible(winRate);
+      await tester.pumpAndSettle();
+      await tester.tap(winRate);
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<DataTable>(
+              find.ancestor(of: winRate, matching: find.byType(DataTable)),
+            )
+            .sortColumnIndex,
+        5,
+      );
+      await tester.tap(find.text('50.0% (1/2)'));
+      await tester.pumpAndSettle();
+      expect(find.text('Performance: Alpha'), findsNothing);
+      expect(
+        find.text('Showing generation 1 · Tuning generation 2 (25%)'),
+        findsOneWidget,
+      );
+      expect(api.posts, isEmpty);
+
       api.snapshotsByRun[preview] = cycleSnapshot(2, 9800);
       await tester.pump(const Duration(seconds: 2));
       await tester.pumpAndSettle();
+      expect(find.text('100.0% (2/2)'), findsOneWidget);
+      expect(
+        find.text('Showing generation 2 · Tuning generation 3 (25%)'),
+        findsOneWidget,
+      );
       final charts = tester.widgetList<EquityChart>(find.byType(EquityChart));
       expect(charts.length, greaterThanOrEqualTo(2));
       for (final chart in charts.where((chart) => !chart.byGeneration)) {
@@ -1399,7 +1447,7 @@ void main() {
         findsOneWidget,
       );
       final generations = charts.singleWhere((chart) => chart.byGeneration);
-      expect(generations.showTrialEquity, isTrue);
+      expect(generations.showTrialEquity, isFalse);
       expect(generations.accounts.single['history'], [
         {'generation': 1, 'value': 10100.0, 'trialValue': 9900.0},
         {'generation': 2, 'value': 9800.0, 'trialValue': 10200.0},
@@ -1424,6 +1472,12 @@ void main() {
       expect((controller.status['research'] as Map)['cycles'], 2);
       expect(controller.events.single['reason'], 'Cycle 2');
       expect(controller.status['runId'], preview);
+      await tester.scrollUntilVisible(
+        find.text('Simulation controls'),
+        -300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Simulation controls'));
       await tester.pumpAndSettle();
       expect(find.text('Simulation run'), findsOneWidget);
@@ -1706,10 +1760,7 @@ void main() {
       find.widgetWithText(TextField, 'Extra-variable mutation (%)'),
       '40',
     );
-    await tester.enterText(
-      find.widgetWithText(TextField, 'Mutation candidates per generation'),
-      '6',
-    );
+    await tester.enterText(find.byKey(const ValueKey('population-size')), '6');
     FocusManager.instance.primaryFocus?.unfocus();
     final buyAndHold = find.widgetWithText(CheckboxListTile, 'Buy & Hold');
     final equalWeight = find.widgetWithText(CheckboxListTile, 'Equal Weight');
@@ -1732,6 +1783,10 @@ void main() {
       'mutationAmount': .5,
       'additionalMutationProbability': .4,
       'candidatesPerGeneration': 6,
+      'eliteFraction': .15,
+      'parentFraction': .5,
+      'crossoverProbability': .8,
+      'minimumMutationAmount': .005,
     });
     expect((request.$2['configuration'] as Map)['watchlist'], ['QQQ']);
     expect((request.$2['configuration'] as Map)['benchmarks'], {
@@ -2242,6 +2297,87 @@ void main() {
     expect(tooltip, findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'candles and fill markers stay inside the plot with price padding',
+    (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              height: 180,
+              child: CandleChart(
+                rows: const [
+                  {
+                    'time': '2026-11-16T15:00:00Z',
+                    'open': 20,
+                    'high': 20,
+                    'low': 20,
+                    'close': 20,
+                    'volume': 100,
+                  },
+                  {
+                    'time': '2026-11-16T15:01:00Z',
+                    'open': 21,
+                    'high': 22,
+                    'low': 19,
+                    'close': 21,
+                    'volume': 100,
+                  },
+                ],
+                events: const [
+                  {
+                    'kind': 'fill',
+                    'action': 'buy',
+                    'time': '2026-11-16T15:00:30Z',
+                    'price': 25,
+                  },
+                  {
+                    'kind': 'fill',
+                    'action': 'sell',
+                    'time': '2026-11-15T15:00:00Z',
+                    'price': 9999,
+                  },
+                  {
+                    'kind': 'signal',
+                    'action': 'wait',
+                    'time': '2026-11-16T15:00:30Z',
+                    'price': 21,
+                  },
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final dynamic painter = tester
+          .widgetList<CustomPaint>(
+            find.descendant(
+              of: find.byType(CandleChart),
+              matching: find.byType(CustomPaint),
+            ),
+          )
+          .firstWhere((paint) => paint.painter != null)
+          .painter;
+      final canvas = _RecordingCanvas();
+      const size = Size(600, 180);
+      painter.paint(canvas, size);
+      expect(canvas.clips, [Offset.zero & size]);
+      expect(canvas.rectangles, hasLength(2));
+      expect(canvas.circles, hasLength(1));
+      for (final rect in canvas.rectangles) {
+        expect(rect.left, greaterThanOrEqualTo(0));
+        expect(rect.right, lessThanOrEqualTo(size.width));
+        expect(rect.top, greaterThan(0));
+        expect(rect.bottom, lessThan(size.height));
+      }
+      for (final (center, radius) in canvas.circles) {
+        expect(center.dy - radius, greaterThanOrEqualTo(0));
+        expect(center.dy + radius, lessThanOrEqualTo(size.height));
+      }
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('candle hover uses the foreground overlay with OHLC values', (
     tester,

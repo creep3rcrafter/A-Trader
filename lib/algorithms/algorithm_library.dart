@@ -5,6 +5,7 @@ import '../strategy_api.dart';
 import 'imported_definition.dart';
 import 'json_algorithm.dart';
 import 'native_algorithm.dart';
+import 'native_algorithm_protocol.dart';
 import 'registry.dart';
 
 /// Each backend/isolate owns its workers; only serializable definitions cross
@@ -33,7 +34,10 @@ class AlgorithmLibrary {
       for (final item in saved) {
         final definition = Map<String, dynamic>.from(item);
         if (definition['kind'] == 'dart' &&
-            !await File(definition['executable'] as String? ?? '').exists()) {
+            (definition['protocolVersion'] != nativeAlgorithmProtocolVersion ||
+                !await File(
+                  definition['executable'] as String? ?? '',
+                ).exists())) {
           final workspace = Directory(
             '${directory.path}/restored-${DateTime.now().microsecondsSinceEpoch}',
           );
@@ -41,6 +45,7 @@ class AlgorithmLibrary {
             definition['source'] as String,
             workspace,
           );
+          definition['protocolVersion'] = nativeAlgorithmProtocolVersion;
         }
         final algorithm = await _open(definition);
         definitions.add(definition);
@@ -84,6 +89,7 @@ class AlgorithmLibrary {
           source,
           workspace,
         );
+        definition['protocolVersion'] = nativeAlgorithmProtocolVersion;
       }
       algorithm = await _open(definition);
       if (StrategyRegistry.all.any(

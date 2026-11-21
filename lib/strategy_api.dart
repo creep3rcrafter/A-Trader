@@ -120,6 +120,29 @@ abstract interface class TradingStrategy {
   StrategySignal evaluate(StrategyContext context);
 }
 
+/// Optional transport optimization: candidates on the same closed candle share
+/// one market-data message. Results must retain the supplied context order.
+abstract interface class BatchTradingStrategy implements TradingStrategy {
+  List<StrategySignal> evaluateBatch(List<StrategyContext> contexts);
+}
+
+abstract interface class StrategyExecutionHealth {
+  String? get executionError;
+}
+
+/// Optional compiled-worker replay using the same simulator and fill rules.
+abstract interface class CandidateReplayStrategy implements TradingStrategy {
+  Map<String, dynamic> replayCandidates({
+    required Map<String, Object?> checkpoint,
+    required List<Map<String, Object?>> strategies,
+    required List<Candle> bars,
+    required List<DateTime> cuts,
+    bool retainEvents = false,
+    bool retainFills = false,
+    void Function(int completedBars)? onProgress,
+  });
+}
+
 typedef StrategyRule = StrategySignal Function(StrategyContext context);
 
 class BuiltinStrategy implements TradingStrategy {

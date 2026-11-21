@@ -22,6 +22,8 @@ import 'secure_storage.dart';
 import 'simulator.dart';
 import 'strategy_tuning.dart';
 import 'algorithms/algorithm_library.dart';
+import 'checkpoint_archives.dart';
+import 'candle_history_cache.dart';
 
 typedef SchwabApiFactory =
     SchwabApi Function(
@@ -54,9 +56,12 @@ class LocalBackend {
     this.dataDirectory,
     this.schwabApiFactory,
     this.researchCycleDelay = Duration.zero,
+    this.autoCollectCandles = false,
     DateTime Function()? clock,
+    DateTime Function()? historyClock,
   }) : _storage = secureStorage ?? SecureStorage(),
-       _clock = clock ?? DateTime.now;
+       _clock = clock ?? DateTime.now,
+       _historyClock = historyClock ?? DateTime.now;
 
   static const defaultWatchlist = ['SOXL', 'OKLO', 'SMR'];
 
@@ -66,10 +71,33 @@ class LocalBackend {
   final SecureStorage _storage;
   final SchwabApiFactory? schwabApiFactory;
   final Duration researchCycleDelay;
+  final bool autoCollectCandles;
   final DateTime Function() _clock;
+  final DateTime Function() _historyClock;
   final Directory? dataDirectory;
   late final _algorithms = AlgorithmLibrary(
     Directory('${_dataRoot.path}/algorithms'),
+  );
+  late final _checkpointArchives = CheckpointArchives(
+    Directory('${_dataRoot.path}/state-archives'),
+  );
+  late final _historyCache = CandleHistoryCache(
+    directory: Directory('${_dataRoot.path}/candles/1m'),
+    // Download freshness uses wall time; a replay's simulated clock must not
+    // discard historical candles that have not yet been replayed.
+    clock: _historyClock,
+    download: ({required symbol, required startUtc, required endUtc}) async {
+      if (!_authorized) {
+        throw StateError(
+          'Connect Schwab in Settings to download missing candle days. Saved days can be replayed offline.',
+        );
+      }
+      return _schwab!.fetchMinuteBars(
+        symbol: symbol,
+        startUtc: startUtc,
+        endUtc: endUtc,
+      );
+    },
   );
   static Map<String, Object?> _defaultSettings() => {
     'watchlist': defaultWatchlist,
@@ -148,8 +176,8 @@ class LocalBackend {
   HttpServer? _server;
   SchwabApi? _schwab;
   late final _research = AutoResearch(
-    fetch: ({required symbol, required startUtc, required endUtc}) => _schwab!
-        .fetchMinuteBars(symbol: symbol, startUtc: startUtc, endUtc: endUtc),
+    fetch: ({required symbol, required startUtc, required endUtc}) =>
+        _historyCache.fetch(symbol: symbol, startUtc: startUtc, endUtc: endUtc),
     clock: _clock,
     cycleDelay: researchCycleDelay,
     onPreview: _publishResearchPreview,
@@ -161,7 +189,10 @@ class LocalBackend {
   String? _lastError;
   Timer? _persistenceTimer;
   Timer? _freshnessTimer;
-  Future<void> _pendingPersistence = Future<void>.value();
+  Timer? _candleCollectionTimer;
+  bool _collectingCandles = false;
+  Future<bool>? _pendingPersistence;
+  bool _persistenceRequested = false;
   bool _credentialsConfigured = false;
   bool _authorized = false;
   bool _persistenceBlocked = false;
@@ -177,6 +208,7 @@ class LocalBackend {
   Future<void> start({int port = 8787}) async {
     if (_server != null) return;
     _port = port;
+    await _historyCache.initialize();
     await _algorithms.restore([]);
     await _loadSettings();
     _schwab =
@@ -200,15 +232,80 @@ class LocalBackend {
         _lastError = 'Automatic Schwab reconnect could not start: $error';
       }
     }
-    _persistenceTimer = Timer.periodic(
-      const Duration(seconds: 5),
-      (_) => unawaited(_persist()),
-    );
+    _persistenceTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      // Historical jobs save at generation boundaries. There is no new data
+      // to save every five seconds while they tune or while runs are stopped.
+      if (_runs.values.any(
+        (run) => !run.historicalMode && run.runtime?.running == true,
+      )) {
+        unawaited(_persist());
+      }
+    });
+    if (autoCollectCandles) {
+      _candleCollectionTimer = Timer.periodic(
+        const Duration(minutes: 5),
+        (_) => unawaited(_collectCompletedCandleDays()),
+      );
+    }
     _freshnessTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       for (final run in _runs.values) {
         if (!run.historicalMode) run.runtime?.checkFreshness();
       }
     });
+  }
+
+  Future<void> _collectCompletedCandleDays() async {
+    if (!_authorized || _collectingCandles) return;
+    _collectingCandles = true;
+    try {
+      final now = _historyClock().toUtc();
+      final eastern = UsEquityCalendar.toEastern(now);
+      var day = DateTime.utc(eastern.year, eastern.month, eastern.day);
+      while (true) {
+        final session = UsEquityCalendar.forDate(
+          day.add(const Duration(hours: 16)),
+        );
+        final close = session == null
+            ? null
+            : UsEquityCalendar.easternToUtc(
+                DateTime(
+                  day.year,
+                  day.month,
+                  day.day,
+                  session.closeMinute ~/ 60,
+                  session.closeMinute % 60,
+                ),
+              );
+        if (close != null &&
+            !now.isBefore(close.add(const Duration(minutes: 15)))) {
+          break;
+        }
+        day = day.subtract(const Duration(days: 1));
+      }
+      final symbols = {
+        for (final run in _runs.values)
+          ...(run.settings['watchlist'] as List).cast<String>(),
+      };
+      for (final symbol in symbols) {
+        final previous = await _historyCache.latestCompleteDay(symbol);
+        var start =
+            previous?.add(const Duration(days: 1)) ??
+            day.subtract(const Duration(days: 28));
+        final oldestDownload = day.subtract(const Duration(days: 28));
+        if (start.isBefore(oldestDownload)) start = oldestDownload;
+        if (!start.isAfter(day)) {
+          await _historyCache.fetch(
+            symbol: symbol,
+            startUtc: start,
+            endUtc: day.add(const Duration(days: 1)),
+          );
+        }
+      }
+    } catch (error) {
+      _historyCache.lastActivity = 'Daily candle collection will retry: $error';
+    } finally {
+      _collectingCandles = false;
+    }
   }
 
   void _handleFeedState(FeedState state, String reason) {
@@ -241,6 +338,7 @@ class LocalBackend {
       _credentialsConfigured = credentialStatus.hasCredentials;
       _authorized = credentialStatus.authorized;
       _redirectUri = credentialStatus.redirectUri;
+      if (autoCollectCandles) unawaited(_collectCompletedCandleDays());
     } catch (error) {
       _credentialsConfigured = false;
       _authorized = false;
@@ -257,6 +355,7 @@ class LocalBackend {
     await _research.stopped;
     _persistenceTimer?.cancel();
     _freshnessTimer?.cancel();
+    _candleCollectionTimer?.cancel();
     for (final run in _runs.values) {
       if (run.historicalMode) run.runtime?.running = false;
       _cancelLmRequests(run);
@@ -299,6 +398,23 @@ class LocalBackend {
         await _writeJson(request, _status(_requestedRun(request)));
       } else if (request.method == 'GET' && path == '/api/algorithms') {
         await _writeJson(request, {'algorithms': _algorithms.catalogue});
+      } else if (request.method == 'POST' && path == '/api/history/download') {
+        final body = await _readBody(request);
+        final symbols =
+            (body['watchlist'] as List?)?.cast<String>() ?? const <String>[];
+        if (symbols.isEmpty || symbols.length > 64) {
+          throw ArgumentError('Choose 1 to 64 symbols.');
+        }
+        final range = _historicalRangeFromBody(body, nowUtc: _clock().toUtc());
+        var count = 0;
+        for (final symbol in symbols) {
+          count += (await _historyCache.fetch(
+            symbol: symbol,
+            startUtc: range.startUtc,
+            endUtc: range.endUtc,
+          )).length;
+        }
+        await _writeJson(request, {'bars': count, ..._historyCache.status});
       } else if (request.method == 'POST' && path == '/api/algorithms/import') {
         if (_importingAlgorithm) {
           throw StateError('Another algorithm import is in progress.');
@@ -332,6 +448,15 @@ class LocalBackend {
         }
       } else if (request.method == 'GET' && path == '/api/snapshot') {
         await _writeJson(request, _snapshot(_requestedRun(request)));
+      } else if (request.method == 'GET' &&
+          path == '/api/evolution/population') {
+        await _writeJson(
+          request,
+          _populationResults(
+            _requestedRun(request),
+            request.uri.queryParameters,
+          ),
+        );
       } else if (request.method == 'GET' &&
           path == '/api/runs/variable-changes') {
         final text = request.uri.queryParameters['generation'];
@@ -368,14 +493,28 @@ class LocalBackend {
           throw ArgumentError('Choose an existing simulation.');
         }
         await _writeJson(request, {'selectedRunId': id});
-      } else if (request.method == 'POST' && path == '/api/runs/create') {
+      } else if (request.method == 'POST' &&
+          (path == '/api/runs/create' || path == '/api/workspace/settings')) {
         final body = await _readBody(request);
-        final number = _nextRunNumber++;
-        final id = 'run-$number';
+        final workspace = path == '/api/workspace/settings';
+        final previous = _selectedSavedRun;
+        if (workspace &&
+            (_research.status['running'] == true ||
+                _research.status['stopping'] == true ||
+                previous.runtime?.running == true ||
+                previous.resumeOnConnection)) {
+          throw StateError('Stop the simulation before changing its setup.');
+        }
+        final number = workspace ? null : _nextRunNumber++;
+        final id = workspace ? previous.id : 'run-$number';
         final name = body['name']?.toString().trim();
         final run = _BackendRun(
           id: id,
-          name: name == null || name.isEmpty ? 'Simulation $number' : name,
+          name: workspace
+              ? 'Simulation'
+              : name == null || name.isEmpty
+              ? 'Simulation $number'
+              : name,
           settings: jsonDecode(jsonEncode(_settings)) as Map<String, dynamic>,
         );
         final configuration = body['configuration'];
@@ -391,10 +530,27 @@ class LocalBackend {
             nowUtc: _clock().toUtc(),
           );
         }
+        if (workspace) {
+          run.settings['_workspaceRevision'] =
+              (previous.settings['_workspaceRevision'] as int? ?? 0) + 1;
+          run.trainingArchive.addAll(previous.trainingArchive);
+          if (previous.researchSession != null ||
+              previous.runtime != null ||
+              previous.savedEngineCheckpoints.isNotEmpty) {
+            final archive = _exportRun(previous)..remove('trainingArchive');
+            run.trainingArchive.add({
+              'simulation': archive,
+              'performance': performanceByRun({
+                'runs': [archive],
+              }),
+            });
+          }
+        }
         _runs[id] = run;
         _selectedRunId = id;
         _viewingResearchPreview = false;
         _followResearchSourceId = null;
+        if (path == '/api/workspace/settings') _loadResearchSession(run);
         await _persist(requireSuccess: true);
         if (_feedState == FeedState.live) {
           await _schwab!.updateStreamingSymbols(_subscriptionSymbols());
@@ -459,6 +615,7 @@ class LocalBackend {
         );
       } else if (request.method == 'POST' && path == '/api/research/start') {
         final body = await _readBody(request);
+        final continuous = body['continuous'] == true;
         final generations = body['generations'] as int? ?? 2;
         final evolutions = body['evolutions'];
         if (evolutions != null &&
@@ -469,9 +626,6 @@ class LocalBackend {
         }
         if (generations < 0 || generations > maxTuningGenerations) {
           throw ArgumentError('Choose 0 to $maxTuningGenerations generations.');
-        }
-        if (!_authorized) {
-          throw StateError('Connect Schwab in Settings to download history.');
         }
         final id = body['runId'];
         final selected =
@@ -487,12 +641,17 @@ class LocalBackend {
           final Map<String, dynamic> fields => _historicalRangeFromBody(
             fields,
             nowUtc: _clock().toUtc(),
+            preserveEndTime: continuous,
           ),
           null =>
             resume != null
                 ? (
-                    startUtc: DateTime.parse(resume['start'] as String),
-                    endUtc: DateTime.parse(resume['end'] as String),
+                    startUtc: DateTime.parse(
+                      (resume['rangeStart'] ?? resume['start']) as String,
+                    ),
+                    endUtc: DateTime.parse(
+                      (resume['rangeEnd'] ?? resume['end']) as String,
+                    ),
                     label:
                         resume['rangeLabel'] as String? ??
                         'Saved training range',
@@ -504,7 +663,7 @@ class LocalBackend {
             'Historical research range must be an object.',
           ),
         };
-        if (evolutions != null && researchRange == null) {
+        if ((evolutions != null || continuous) && researchRange == null) {
           throw ArgumentError('Choose a historical date range.');
         }
         final run = _BackendRun(
@@ -532,6 +691,7 @@ class LocalBackend {
           strategies: _buildStrategySettings(run),
           generations: evolutions == null ? generations : 1,
           evolutionLimit: evolutions as int?,
+          continuous: continuous,
           historicalRange: researchRange,
           evolution: evolution,
           resume: resume,
@@ -559,7 +719,9 @@ class LocalBackend {
           selected.strategyBests.clear();
           selected.researchPreview = null;
         }
-        _followResearchSourceId = evolutions != null ? selected.id : null;
+        _followResearchSourceId = evolutions != null || continuous
+            ? selected.id
+            : null;
         _saveResearchSession();
         await _persist(requireSuccess: true);
         await _writeJson(request, {'started': true});
@@ -943,16 +1105,21 @@ class LocalBackend {
     runtime.engines[1] = engine;
     final research = _research.status;
     final limit = research['evolutionLimit'];
+    final continuous = research['continuous'] == true;
     final generation = research['cycles'] as int;
-    if (limit != null) {
-      final trialEquity = {
-        for (final result in (research['lastResults'] as List).cast<Map>())
-          if (result['candidateParameters'] != null)
-            if (result['tunedValidation'] case {
-              'endingEquity': final num equity,
-            })
-              result['label']: equity,
-      };
+    if (limit != null || continuous) {
+      final trialEquity = <String, num>{};
+      for (final result in (research['lastResults'] as List).cast<Map>()) {
+        final metrics =
+            ((result['populationSummary'] as Map?)?['candidatePerformance'] ??
+                    result['tunedValidation'])
+                as Map?;
+        if (result['candidateParameters'] != null &&
+            metrics?['endingEquity'] is num) {
+          trialEquity[result['label'] as String] =
+              metrics!['endingEquity'] as num;
+        }
+      }
       final previous = generation > 1
           ? _researchPreview?.generationEquity
           : null;
@@ -968,11 +1135,13 @@ class LocalBackend {
           ],
       };
     }
-    runtime.runStatus = limit == null
+    runtime.runStatus = continuous
+        ? 'Generation $generation · ${range.label}'
+        : limit == null
         ? 'Research replay complete · ${range.label}'
         : 'Generation ${research['cycles']} of $limit · ${range.label}';
     run.runtime = runtime;
-    if (limit != null) {
+    if (limit != null || continuous) {
       final exported = _exportRun(run);
       _generationExports.add({
         'generation': generation,
@@ -980,7 +1149,7 @@ class LocalBackend {
         'performance': performanceByRun({
           'runs': [exported],
         }).single['portfolios'],
-        'tuningResults': research['lastResults'],
+        'tuningResults': _research.latestResults,
       });
       final source = _runs[_researchSourceId];
       if (source != null) {
@@ -1141,7 +1310,11 @@ class LocalBackend {
     final settings = selected.settings;
     return {
       'runId': selected.id,
+      'workspaceMode': true,
+      'workspaceId': trainingRun?.id ?? _selectedSavedRun.id,
+      'workspaceRevision': trainingRun?.settings['_workspaceRevision'] ?? 0,
       'algorithmImportsSupported': true,
+      'historyCache': _historyCache.status,
       'algorithms': _algorithms.catalogue,
       'runName': selected.name,
       'trainingSession': session == null
@@ -1149,10 +1322,11 @@ class LocalBackend {
           : {
               'cycles': session['cycles'],
               'evolutionLimit': session['evolutionLimit'],
+              'continuous': session['continuous'],
               'evolution': session['evolution'],
               'source': session['source'],
-              'start': session['start'],
-              'end': session['end'],
+              'start': session['rangeStart'] ?? session['start'],
+              'end': session['rangeEnd'] ?? session['end'],
             },
       'strategyBests': trainingRun?.strategyBests,
       if (selected.id == _researchPreviewId) ...{
@@ -1388,6 +1562,57 @@ class LocalBackend {
     };
   }
 
+  Map<String, Object?> _populationResults(
+    _BackendRun run,
+    Map<String, String> query,
+  ) {
+    final source = run.id == _researchPreviewId
+        ? _runs[_researchSourceId]
+        : run;
+    final history = source?.generationResults ?? const [];
+    final text = query['generation'];
+    final generation = text == null ? null : int.tryParse(text);
+    if (text != null && generation == null) {
+      throw ArgumentError('Invalid generation.');
+    }
+    final selected = generation == null
+        ? history.lastOrNull
+        : history.where((row) => row['generation'] == generation).firstOrNull;
+    if (generation != null && selected == null) {
+      throw ArgumentError('Choose a completed generation.');
+    }
+    final results = (selected?['tuningResults'] as List? ?? const [])
+        .cast<Map>();
+    final label = query['strategy'];
+    final strategy =
+        results.where((r) => r['label'] == label).firstOrNull ??
+        results.firstOrNull;
+    final members = (strategy?['individuals'] as List? ?? const []).cast<Map>();
+    final id = query['individual'];
+    final individual = id == null
+        ? null
+        : members.where((m) => m['id'] == id).firstOrNull;
+    if (id != null && individual == null) {
+      throw ArgumentError('Unknown individual.');
+    }
+    return {
+      'sessionId': source?.researchSession?['sessionId'],
+      'generation': selected?['generation'],
+      'latestGeneration': history.lastOrNull?['generation'] ?? 0,
+      'strategies': [for (final r in results) r['label']],
+      'strategy': strategy?['label'],
+      'championId': strategy?['championId'],
+      'individuals': [
+        for (final m in members)
+          {
+            for (final e in m.entries)
+              if (e.key != 'account') e.key as String: e.value,
+          },
+      ],
+      'individual': ?individual,
+    };
+  }
+
   List<Map<String, Object?>> _runEvents(_BackendRun run) =>
       (run.runtime?.engines.values.expand((engine) => engine.events).toList() ??
               <DecisionEvent>[])
@@ -1600,6 +1825,10 @@ class LocalBackend {
       ..['benchmarks'] = benchmarks.toJson()
       ..['evolution'] = evolution.toJson()
       ..['trainingGenerations'] = count
+      ..['continuousResearch'] =
+          body['continuousResearch'] as bool? ??
+          settings['continuousResearch'] as bool? ??
+          false
       ..['mode'] = mode
       ..['historicalSetup'] = setup
       ..['strategies'] = strategySettings
@@ -1611,6 +1840,7 @@ class LocalBackend {
   static HistoricalRange _historicalRangeFromBody(
     Map<String, dynamic> body, {
     required DateTime nowUtc,
+    bool preserveEndTime = false,
   }) => historicalRange(
     body['startDate']?.toString() ?? '',
     body['endDate']?.toString() ?? '',
@@ -1618,6 +1848,7 @@ class LocalBackend {
     endTime: body['endTime']?.toString(),
     timeZone: body['timeZone']?.toString(),
     nowUtc: nowUtc,
+    preserveEndTime: preserveEndTime,
   );
 
   static HistoricalRange historicalRange(
@@ -1627,6 +1858,7 @@ class LocalBackend {
     String? endTime,
     String? timeZone,
     required DateTime nowUtc,
+    bool preserveEndTime = false,
   }) {
     if (timeZone != null && timeZone != MountainTime.zoneId) {
       throw ArgumentError(
@@ -1718,7 +1950,9 @@ class LocalBackend {
     if (!startUtc.isBefore(nowUtc)) {
       throw ArgumentError('Historical replay cannot start in the future.');
     }
-    final endUtc = endOfRange.isAfter(nowUtc) ? nowUtc : endOfRange;
+    final endUtc = !preserveEndTime && endOfRange.isAfter(nowUtc)
+        ? nowUtc
+        : endOfRange;
     String withTime(
       String date,
       ({int hour, int minute})? time,
@@ -1746,9 +1980,6 @@ class LocalBackend {
       throw StateError(
         'Stop the current simulation before starting a historical replay.',
       );
-    }
-    if (!_authorized) {
-      throw StateError('Connect Schwab in Settings to download history.');
     }
     final clock = ReplayClock();
     if (_runtime != null || _savedEngineCheckpoints.isNotEmpty) {
@@ -1778,9 +2009,9 @@ class LocalBackend {
       for (final (index, symbol) in runtime.watchlist.indexed) {
         if (!runtime.running) break;
         runtime.runStatus =
-            'Downloading Schwab history · $symbol '
+            'Loading saved/downloaded 1m history · $symbol '
             '(${index + 1} of ${runtime.watchlist.length})';
-        final fetched = await _schwab!.fetchMinuteBars(
+        final fetched = await _historyCache.fetch(
           symbol: symbol,
           startUtc: range.startUtc,
           endUtc: range.endUtc,
@@ -2357,7 +2588,9 @@ class LocalBackend {
       final recovered = <String, _BackendRun>{};
       if (savedRuns is List) {
         for (final value in savedRuns) {
-          final saved = value as Map<String, dynamic>;
+          final saved = await _checkpointArchives.unpackRun(
+            value as Map<String, dynamic>,
+          );
           final id = saved['id'] as String;
           if (recovered.containsKey(id)) {
             throw const FormatException(
@@ -2365,6 +2598,7 @@ class LocalBackend {
             );
           }
           recovered[id] = _restoreRun(saved, id, saved['name'] as String);
+          await _seedCandleCache(recovered[id]!.researchSession);
         }
       } else {
         recovered['run-1'] = _restoreRun(restored, 'run-1', 'Simulation 1');
@@ -2467,19 +2701,52 @@ class LocalBackend {
     return run;
   }
 
+  Future<void> _seedCandleCache(Map<String, dynamic>? session) async {
+    final history = session?['history'] as Map?;
+    if (history == null) return;
+    for (final entry in history.entries) {
+      final symbol = entry.key as String;
+      final bars = [
+        for (final raw in (entry.value as List).cast<Map>())
+          MinuteBar(
+            symbol: symbol,
+            openTime: DateTime.parse(raw['time'] as String),
+            open: (raw['open'] as num).toDouble(),
+            high: (raw['high'] as num).toDouble(),
+            low: (raw['low'] as num).toDouble(),
+            close: (raw['close'] as num).toDouble(),
+            volume: (raw['volume'] as num).toDouble(),
+          ),
+      ];
+      await _historyCache.remember(symbol, bars);
+    }
+  }
+
   Future<void> _persist({
     bool requireSuccess = false,
     String failureMessage =
         'Changes are in memory but could not be saved. '
         'They may be lost after a restart.',
   }) {
-    final next = _pendingPersistence.then((_) => _writeState());
-    _pendingPersistence = next.then((_) {});
+    _persistenceRequested = true;
+    final next = _pendingPersistence ??= _drainPersistence().whenComplete(() {
+      _pendingPersistence = null;
+    });
     return next.then((success) {
       if (requireSuccess && !success) {
         throw StateError('$failureMessage $_lastError');
       }
     });
+  }
+
+  Future<bool> _drainPersistence() async {
+    var success = true;
+    while (_persistenceRequested) {
+      _persistenceRequested = false;
+      success = await _writeState();
+      if (!success) break;
+    }
+    return success;
   }
 
   Future<bool> _writeState() async {
@@ -2504,7 +2771,10 @@ class LocalBackend {
         'selectedRunId': _selectedRunId,
         'nextRunNumber': _nextRunNumber,
         'training': _training.checkpoint(),
-        'runs': [for (final run in _runs.values) _exportRun(run)],
+        'runs': [
+          for (final run in _runs.values.toList())
+            await _checkpointArchives.packRun(_exportRun(run)),
+        ],
         'settings': _selectedSavedRun.settings,
         'lmStudio': _lmSettings,
         'savedAt': DateTime.now().toUtc().toIso8601String(),
@@ -2512,7 +2782,8 @@ class LocalBackend {
       };
       final temporary = File('${file.path}.tmp');
       final backup = File('${file.path}.bak');
-      await temporary.writeAsString(jsonEncode(payload), flush: true);
+      final encoded = await Isolate.run(() => jsonEncode(payload));
+      await temporary.writeAsString(encoded, flush: true);
       if (await file.exists()) {
         if (await backup.exists()) await backup.delete();
         await file.rename(backup.path);

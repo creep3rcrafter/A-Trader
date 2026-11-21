@@ -4,12 +4,23 @@ import 'dart:io';
 
 import '../strategy_api.dart';
 import 'imported_definition.dart';
+import 'native_algorithm_protocol.dart';
+import 'native_algorithm_events.dart';
+import 'native_algorithm_progress.dart';
 
 /// A compiled Dart algorithm runs in a persistent local worker. File messages
 /// let the synchronous simulator retain its existing decision/fill ordering.
-class NativeAlgorithm extends ImportedAlgorithmDefinition {
+class NativeAlgorithm extends ImportedAlgorithmDefinition
+    implements
+        BatchTradingStrategy,
+        StrategyExecutionHealth,
+        CandidateReplayStrategy {
   NativeAlgorithm._(super.json, this._worker) : super.fromJson();
   final NativeAlgorithmWorker _worker;
+  final _market = AlgorithmMarketEncoder();
+  @override
+  String? executionError;
+  int get workerRequestCount => _worker.requestCount;
 
   static Future<NativeAlgorithm> open(Map<String, dynamic> definition) async {
     final worker = await NativeAlgorithmWorker.start(
@@ -17,6 +28,12 @@ class NativeAlgorithm extends ImportedAlgorithmDefinition {
     );
     try {
       final algorithm = NativeAlgorithm._(worker.metadata, worker);
+      if (worker.metadata['protocolVersion'] !=
+          nativeAlgorithmProtocolVersion) {
+        throw StateError(
+          'The Dart worker needs a protocol upgrade. Restart the backend to recompile it.',
+        );
+      }
       if (definition['metadata'] case final Map expected) {
         if (jsonEncode(algorithm.toJson()) !=
             jsonEncode(
@@ -39,26 +56,101 @@ class NativeAlgorithm extends ImportedAlgorithmDefinition {
   Future<void> close() => _worker.close();
 
   @override
+  Map<String, dynamic> replayCandidates({
+    required Map<String, Object?> checkpoint,
+    required List<Map<String, Object?>> strategies,
+    required List<Candle> bars,
+    required List<DateTime> cuts,
+    bool retainEvents = false,
+    bool retainFills = false,
+    void Function(int)? onProgress,
+  }) {
+    try {
+      final result = _worker.evaluate(
+        {
+          'operation': 'replay',
+          'retainEvents': retainEvents,
+          'retainFills': retainFills,
+          'checkpoint': checkpoint,
+          'strategies': strategies,
+          'bars': bars.map(encodeAlgorithmCandle).toList(),
+          'cuts': cuts.map((cut) => cut.toIso8601String()).toList(),
+        },
+        timeout: const Duration(minutes: 2),
+        onProgress: onProgress,
+      );
+      if (result['error'] != null) {
+        throw NativeAlgorithmWorkerFailure(result['error'].toString());
+      }
+      return result;
+    } catch (error) {
+      executionError ??= error.toString();
+      throw StateError('$name replay failed: $error');
+    }
+  }
+
+  @override
   StrategySignal evaluate(StrategyContext context) {
+    return evaluateBatch([context]).single;
+  }
+
+  @override
+  List<StrategySignal> evaluateBatch(List<StrategyContext> contexts) {
+    if (contexts.isEmpty) return [];
+    final first = contexts.first;
+    if (contexts.any(
+      (context) =>
+          context.executionId != first.executionId ||
+          context.current.key != first.current.key,
+    )) {
+      return [for (final context in contexts) evaluate(context)];
+    }
     try {
       final raw = _worker.evaluate({
-        'candles': [for (final bar in context.candles) _candle(bar)],
-        'watchlist': {
-          for (final entry in context.watchlist.entries)
-            entry.key: [for (final bar in entry.value) _candle(bar)],
-        },
-        'hasPosition': context.hasPosition,
-        'entryPrice': context.entryPrice,
-        'positionStop': context.positionStop,
-        'positionSide': context.positionSide.name,
-        'parameters': context.parameters,
-        'intervalMinutes': context.intervalMinutes,
-        'sessionElapsedMinutes': context.sessionElapsedMinutes,
-        'sessionLengthMinutes': context.sessionLengthMinutes,
-        'barsHeld': context.barsHeld,
-        'portfolioLabel': context.portfolioLabel,
-        'executionId': context.executionId,
+        'market': _market.encode(first),
+        'contexts': [
+          for (final context in contexts)
+            {
+              'hasPosition': context.hasPosition,
+              'entryPrice': context.entryPrice,
+              'positionStop': context.positionStop,
+              'positionSide': context.positionSide.name,
+              'parameters': context.parameters,
+              'intervalMinutes': context.intervalMinutes,
+              'sessionElapsedMinutes': context.sessionElapsedMinutes,
+              'sessionLengthMinutes': context.sessionLengthMinutes,
+              'barsHeld': context.barsHeld,
+              'portfolioLabel': context.portfolioLabel,
+              'executionId': context.executionId,
+            },
+        ],
       });
+      if (raw['error'] != null) {
+        throw NativeAlgorithmWorkerFailure(raw['error'].toString());
+      }
+      final signals = raw['signals'] as List;
+      if (signals.length != contexts.length) {
+        throw NativeAlgorithmWorkerFailure(
+          'Dart worker returned an incomplete batch.',
+        );
+      }
+      return [
+        for (final signal in signals)
+          _signal(Map<String, dynamic>.from(signal as Map)),
+      ];
+    } on Object catch (error) {
+      if (error is NativeAlgorithmWorkerFailure) {
+        executionError ??= error.toString();
+      }
+      return [
+        for (final _ in contexts)
+          StrategySignal(TradeAction.wait, 'Dart algorithm $id: $error'),
+      ];
+    }
+  }
+
+  StrategySignal _signal(Map<String, dynamic> raw) {
+    try {
       if (raw['error'] != null) throw StateError(raw['error'].toString());
       double? price(String key) {
         final value = raw[key];
@@ -97,37 +189,74 @@ class NativeAlgorithm extends ImportedAlgorithmDefinition {
     }
     return value.toDouble();
   }
+}
 
-  static Map<String, Object?> _candle(Candle bar) => {
-    'symbol': bar.symbol,
-    'time': bar.time.toUtc().toIso8601String(),
-    'open': bar.open,
-    'high': bar.high,
-    'low': bar.low,
-    'close': bar.close,
-    'volume': bar.volume,
-  };
+class NativeAlgorithmWorkerFailure implements Exception {
+  NativeAlgorithmWorkerFailure(this.message);
+  final String message;
+  @override
+  String toString() => message;
+}
+
+/// Wait for the worker's atomically published startup message. Windows can
+/// briefly lock the file even after it has appeared in the directory.
+Future<Map<String, dynamic>> readNativeAlgorithmReady(
+  File ready, {
+  Duration timeout = const Duration(seconds: 10),
+  String Function()? diagnostics,
+}) async {
+  final timer = Stopwatch()..start();
+  FileSystemException? lastLock;
+  while (true) {
+    try {
+      return jsonDecode(await ready.readAsString()) as Map<String, dynamic>;
+    } on PathNotFoundException {
+      // The worker has not published its metadata yet.
+    } on FileSystemException catch (error) {
+      if (!Platform.isWindows ||
+          !const {32, 33}.contains(error.osError?.errorCode)) {
+        rethrow;
+      }
+      lastLock = error;
+    }
+    if (timer.elapsed >= timeout) {
+      throw NativeAlgorithmWorkerFailure(
+        [
+          'Dart algorithm did not start.',
+          if (lastLock != null) 'Startup file stayed locked: $lastLock',
+          if (diagnostics?.call() case final String output
+              when output.isNotEmpty)
+            output,
+        ].join(' '),
+      );
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }
 
 class NativeAlgorithmWorker {
-  NativeAlgorithmWorker._(this._directory, this._process);
+  NativeAlgorithmWorker._(this._directory, this._process, this._notifications);
   final Directory _directory;
   final Process _process;
+  final NativeAlgorithmEvents _notifications;
+  late final _progress = NativeAlgorithmProgress(_directory);
   late final Map<String, dynamic> metadata;
   bool _closed = false;
   String _diagnostics = '';
   int _sequence = 0;
+  int get requestCount => _sequence;
 
   static Future<NativeAlgorithmWorker> start(String executable) async {
     final directory = await Directory.systemTemp.createTemp(
       'atrader-algorithm-',
     );
     NativeAlgorithmWorker? worker;
+    final notifications = NativeAlgorithmEvents(directory.path);
     try {
       final process = await Process.start(executable, [
         directory.path,
       ], workingDirectory: File(executable).parent.path);
-      worker = NativeAlgorithmWorker._(directory, process);
+      worker = NativeAlgorithmWorker._(directory, process, notifications);
       void output(List<int> bytes) {
         worker!._diagnostics += utf8.decode(bytes, allowMalformed: true);
         if (worker._diagnostics.length > 4000) {
@@ -139,18 +268,10 @@ class NativeAlgorithmWorker {
 
       process.stdout.listen(output);
       process.stderr.listen(output);
-      final ready = File('${directory.path}/ready.json');
-      final timer = Stopwatch()..start();
-      while (!await ready.exists()) {
-        if (timer.elapsed > const Duration(seconds: 10)) {
-          throw StateError(
-            'Dart algorithm did not start. ${worker._diagnostics}',
-          );
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      final raw =
-          jsonDecode(await ready.readAsString()) as Map<String, dynamic>;
+      final raw = await readNativeAlgorithmReady(
+        File('${directory.path}/ready.json'),
+        diagnostics: () => worker!._diagnostics,
+      );
       if (raw['error'] != null) throw StateError(raw['error'].toString());
       worker.metadata = raw;
       return worker;
@@ -158,15 +279,37 @@ class NativeAlgorithmWorker {
       if (worker != null) {
         await worker.close();
       } else {
+        notifications.close();
         await directory.delete(recursive: true);
       }
       rethrow;
     }
   }
 
-  Map<String, dynamic> evaluate(Map<String, Object?> context) {
+  Map<String, dynamic> evaluate(
+    Map<String, Object?> context, {
+    Duration timeout = const Duration(seconds: 5),
+    void Function(int)? onProgress,
+  }) {
+    try {
+      return _communicate(context, timeout, onProgress);
+    } catch (error) {
+      _closed = true;
+      _process.kill();
+      if (error is NativeAlgorithmWorkerFailure) rethrow;
+      throw NativeAlgorithmWorkerFailure(
+        'Dart worker communication failed: $error',
+      );
+    }
+  }
+
+  Map<String, dynamic> _communicate(
+    Map<String, Object?> context,
+    Duration timeout,
+    void Function(int)? onProgress,
+  ) {
     if (_closed) {
-      throw StateError(
+      throw NativeAlgorithmWorkerFailure(
         'Worker stopped after an error. Reopen the backend to restart it.',
       );
     }
@@ -176,23 +319,35 @@ class NativeAlgorithmWorker {
     final response = File('${_directory.path}/response.json');
     temporary.writeAsStringSync(
       jsonEncode({'sequence': sequence, 'context': context}),
-      flush: true,
     );
     temporary.renameSync(request.path);
+    _notifications.requestReady();
     final timer = Stopwatch()..start();
     while (!response.existsSync()) {
-      if (timer.elapsed > const Duration(seconds: 5)) {
+      if (timer.elapsed > timeout) {
         _closed = true;
         _process.kill();
-        throw StateError('Decision exceeded 5 seconds; worker stopped.');
+        throw NativeAlgorithmWorkerFailure(
+          'Dart worker request exceeded ${timeout.inSeconds} seconds; worker stopped. No generation results were accepted.',
+        );
       }
-      sleep(const Duration(milliseconds: 1));
+      if (_notifications.enabled) {
+        _notifications.waitForResponse(const Duration(milliseconds: 100));
+      } else {
+        sleep(const Duration(milliseconds: 1));
+      }
+      if (onProgress != null) {
+        final completed = _progress.readLatest(sequence);
+        if (completed != null) onProgress(completed);
+      }
     }
     final result =
         jsonDecode(response.readAsStringSync()) as Map<String, dynamic>;
     response.deleteSync();
     if (result['sequence'] != sequence) {
-      throw StateError('Worker returned an out-of-order decision.');
+      throw NativeAlgorithmWorkerFailure(
+        'Worker returned an out-of-order decision.',
+      );
     }
     return result['signal'] as Map<String, dynamic>;
   }
@@ -204,6 +359,7 @@ class NativeAlgorithmWorker {
       const Duration(seconds: 2),
       onTimeout: () => -1,
     );
+    _notifications.close();
     if (await _directory.exists()) await _directory.delete(recursive: true);
   }
 }
@@ -338,17 +494,75 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:atrader/strategy_api.dart';
 import 'package:atrader/algorithms/user_algorithm.dart';
+import 'package:atrader/algorithms/native_algorithm_protocol.dart';
+import 'package:atrader/algorithms/native_algorithm_events.dart';
+import 'package:atrader/algorithms/native_algorithm_progress.dart';
+import 'package:atrader/simulator.dart';
+
+class _CandidateAlgorithm implements TradingStrategy {
+  final TradingStrategy prototype = ALGORITHM_CLASS();
+  final instances = <String, TradingStrategy>{};
+  String get id => prototype.id;
+  String get name => prototype.name;
+  String get description => prototype.description;
+  int get warmupBars => prototype.warmupBars;
+  List<StrategyParameter> get parameters => prototype.parameters;
+  StrategySignal evaluate(StrategyContext context) =>
+    instances.putIfAbsent(context.portfolioLabel, () => ALGORITHM_CLASS()).evaluate(context);
+}
+
+Map<String, Object?> replay(Map raw, void Function(int) progress) {
+  final selected = _CandidateAlgorithm();
+  StrategyRegistry.all.add(selected);
+  try {
+    final initial = Map<String, dynamic>.from(raw['checkpoint'] as Map);
+    final watchlist = (initial['watchlist'] as List).cast<String>();
+    final settings = [for (final item in (raw['strategies'] as List).cast<Map>()) StrategySettings(
+      strategyId: item['strategyId'] as String, label: item['label'] as String,
+      intervalMinutes: item['intervalMinutes'] as int,
+      startingCash: (item['startingCash'] as num?)?.toDouble(),
+      parameters: (item['parameters'] as Map).map((key,value) => MapEntry(key as String,(value as num).toDouble())),
+    )];
+    final engine = SimulatorEngine.restore(watchlist: watchlist, strategies: settings,
+      startingCash: ((initial['execution'] as Map)['startingCash'] as num).toDouble(), checkpoint: initial);
+    final cuts = (raw['cuts'] as List).map((time) => DateTime.parse(time as String)).toList();
+    final counts = <Map<String, int>>[];
+    final bars = raw['bars'] as List;
+    final timer = Stopwatch()..start();
+    var nextProgress = 0;
+    for (var i = 0; i < bars.length; i++) {
+      final item = bars[i] as Map;
+      final time = DateTime.parse(item['time'] as String);
+      if (counts.length < cuts.length && !time.isBefore(cuts[counts.length])) {
+        counts.add({for (final account in engine.accounts.values) account.label: account.closedTradeCount});
+      }
+      engine.process(Candle(symbol:item['symbol'] as String,time:time,
+        open:(item['open'] as num).toDouble(),high:(item['high'] as num).toDouble(),
+        low:(item['low'] as num).toDouble(),close:(item['close'] as num).toDouble(),volume:(item['volume'] as num).toDouble()));
+      if (raw['retainEvents'] != true) {
+        for(final account in engine.accounts.values) {
+          if(raw['retainFills'] == true) {
+            account.events.removeWhere((event) => event.kind != 'fill');
+          } else { account.events.clear(); }
+        }
+      }
+      if(timer.elapsedMilliseconds >= nextProgress){progress(i+1);nextProgress=timer.elapsedMilliseconds+200;}
+    }
+    return {'checkpoint':engine.checkpoint(),'tradesAtCuts':counts};
+  } finally { StrategyRegistry.all.remove(selected); }
+}
 
 void main(List<String> arguments) {
   final directory = arguments.single;
   void write(String name, Object value) {
     final temporary = File('$directory/$name.tmp');
-    temporary.writeAsStringSync(jsonEncode(value), flush: true);
+    temporary.writeAsStringSync(jsonEncode(value));
     temporary.renameSync('$directory/$name');
   }
   try {
     final TradingStrategy algorithm = ALGORITHM_CLASS();
     write('ready.json', {
+      'protocolVersion': nativeAlgorithmProtocolVersion,
       'id': algorithm.id, 'name': algorithm.name,
       'description': algorithm.description, 'warmupBars': algorithm.warmupBars,
       'parameters': {for (final p in algorithm.parameters) p.name: {
@@ -357,26 +571,34 @@ void main(List<String> arguments) {
       }},
     });
     final instances = <String, TradingStrategy>{};
+    final market = AlgorithmMarketDecoder();
+    final notifications = NativeAlgorithmEvents(directory);
+    final progress = NativeAlgorithmProgress(Directory(directory));
     final request = File('$directory/request.json');
     while (true) {
+      if (notifications.enabled) { notifications.waitForRequest(); }
       if (!request.existsSync()) { sleep(const Duration(milliseconds: 1)); continue; }
       final message = jsonDecode(request.readAsStringSync()) as Map<String, dynamic>;
       request.deleteSync();
       Map<String, Object?> result;
       try {
-        final raw = message['context'] as Map<String, dynamic>;
-        Candle candle(Map raw) => Candle(
-          symbol: raw['symbol'] as String, time: DateTime.parse(raw['time'] as String),
-          open: (raw['open'] as num).toDouble(), high: (raw['high'] as num).toDouble(),
-          low: (raw['low'] as num).toDouble(), close: (raw['close'] as num).toDouble(),
-          volume: (raw['volume'] as num).toDouble(),
-        );
-        List<Candle> bars(Object? raw) => (raw as List).map((bar) => candle(bar as Map)).toList();
+        final payload = message['context'] as Map;
+        if (payload['operation'] == 'replay') {
+          final result = replay(payload, (completed) { progress.publish(message['sequence'] as int, completed); });
+          write('response.json', {'sequence': message['sequence'], 'signal': result});
+          notifications.responseReady();
+          continue;
+        }
+        final data = market.apply(payload['market'] as Map);
+        final signals = <Map<String, Object?>>[];
+        for (final raw in (payload['contexts'] as List).cast<Map>()) {
+        Map<String, Object?> decision;
+        try {
         final instanceKey = '${raw['executionId']}|${raw['portfolioLabel']}';
         final instance = instances.putIfAbsent(instanceKey, () => ALGORITHM_CLASS());
         final signal = instance.evaluate(StrategyContext(
-          candles: bars(raw['candles']),
-          watchlist: (raw['watchlist'] as Map).map((key, value) => MapEntry(key as String, bars(value))),
+          candles: data.candles,
+          watchlist: data.watchlist,
           hasPosition: raw['hasPosition'] as bool,
           entryPrice: (raw['entryPrice'] as num?)?.toDouble(),
           positionStop: (raw['positionStop'] as num?)?.toDouble(),
@@ -388,7 +610,7 @@ void main(List<String> arguments) {
           barsHeld: raw['barsHeld'] as int, portfolioLabel: raw['portfolioLabel'] as String,
           executionId: raw['executionId'] as String? ?? '',
         ));
-        result = {
+        decision = {
           'action': signal.action.name, 'reason': signal.reason,
           'side': signal.side.name, 'positionEffect': signal.positionEffect?.name,
           'stop': signal.stop, 'target': signal.target,
@@ -396,9 +618,14 @@ void main(List<String> arguments) {
           'sourceStrategyId': signal.sourceStrategyId,
           'sourceStrategyParameters': signal.sourceStrategyParameters,
         };
-        jsonEncode(result);
+        jsonEncode(decision);
+        } catch (error) { decision = {'error': error.toString()}; }
+        signals.add(decision);
+        }
+        result = {'signals': signals};
       } catch (error) { result = {'error': error.toString()}; }
       write('response.json', {'sequence': message['sequence'], 'signal': result});
+      notifications.responseReady();
     }
   } catch (error) { write('ready.json', {'error': error.toString()}); }
 }

@@ -351,6 +351,46 @@ class SimulatorEngine {
         ? List<Candle>.unmodifiable(symbolBars)
         : snapshot[bar.symbol]!;
     final session = UsEquityCalendar.forDate(bar.time);
+    final batches =
+        <
+          BatchTradingStrategy,
+          List<
+            ({
+              StrategyAccount account,
+              SimulatedPosition? position,
+              StrategyContext context,
+            })
+          >
+        >{};
+    void applySignal(
+      StrategyAccount account,
+      SimulatedPosition? position,
+      StrategySignal signal,
+    ) {
+      account.events.add(
+        DecisionEvent(
+          strategy: account.label,
+          symbol: bar.symbol,
+          time: bar.time,
+          action: signal.action,
+          kind: 'signal',
+          reason: signal.reason,
+          price: bar.close,
+          measurements: signal.measurements,
+          side:
+              position?.side ??
+              (signal.action != TradeAction.wait ? signal.side : null),
+          stop: signal.stop ?? position?.stop,
+          target: signal.target ?? position?.target,
+          entryPrice: position?.entryPrice,
+          positionEffect: signal.positionEffect?.name,
+        ),
+      );
+      if (signal.action != TradeAction.wait) {
+        _checkAndQueue(account, bar, signal);
+      }
+    }
+
     for (final account in accounts.values) {
       account.positionValuations.remove(bar.symbol);
       final overnightPosition = account.positions[bar.symbol];
@@ -406,46 +446,31 @@ class SimulatorEngine {
             pendingEntry?.sourceStrategyParameters ??
             settings.parameters;
         if (symbolBars.length >= strategy.warmupBars) {
-          final signal = strategy.evaluate(
-            StrategyContext(
-              candles: symbolView,
-              watchlist: snapshot,
-              hasPosition: position != null,
-              entryPrice: position?.entryPrice,
-              positionStop: position?.stop,
-              positionSide: position?.side ?? PositionSide.long,
-              parameters: parameters,
-              intervalMinutes: settings.intervalMinutes,
-              sessionElapsedMinutes: session?.elapsedMinutes,
-              sessionLengthMinutes: session?.durationMinutes,
-              barsHeld: position == null
-                  ? 0
-                  : _barsAfter(symbolBars, position.entryTime),
-              portfolioLabel: account.label,
-              executionId: _algorithmExecutionId,
-            ),
+          final context = StrategyContext(
+            candles: symbolView,
+            watchlist: snapshot,
+            hasPosition: position != null,
+            entryPrice: position?.entryPrice,
+            positionStop: position?.stop,
+            positionSide: position?.side ?? PositionSide.long,
+            parameters: parameters,
+            intervalMinutes: settings.intervalMinutes,
+            sessionElapsedMinutes: session?.elapsedMinutes,
+            sessionLengthMinutes: session?.durationMinutes,
+            barsHeld: position == null
+                ? 0
+                : _barsAfter(symbolBars, position.entryTime),
+            portfolioLabel: account.label,
+            executionId: _algorithmExecutionId,
           );
-          account.events.add(
-            DecisionEvent(
-              strategy: account.label,
-              symbol: bar.symbol,
-              time: bar.time,
-              action: signal.action,
-              kind: 'signal',
-              reason: signal.reason,
-              price: bar.close,
-              measurements: signal.measurements,
-              side:
-                  position?.side ??
-                  (signal.action != TradeAction.wait ? signal.side : null),
-              stop: signal.stop ?? position?.stop,
-              target: signal.target ?? position?.target,
-              entryPrice: position?.entryPrice,
-              positionEffect: signal.positionEffect?.name,
-            ),
-          );
-          if (signal.action != TradeAction.wait) {
-            _checkAndQueue(account, bar, signal);
+          if (strategy is BatchTradingStrategy) {
+            (batches[strategy] ??= []).add((
+              account: account,
+              position: position,
+              context: context,
+            ));
+          } else {
+            applySignal(account, position, strategy.evaluate(context));
           }
         } else {
           account.events.add(
@@ -462,6 +487,22 @@ class SimulatorEngine {
           );
         }
       }
+    }
+    for (final entry in batches.entries) {
+      final signals = entry.key.evaluateBatch([
+        for (final item in entry.value) item.context,
+      ]);
+      if (signals.length != entry.value.length) {
+        throw StateError(
+          'Algorithm returned an incorrect number of batched decisions.',
+        );
+      }
+      for (var i = 0; i < signals.length; i++) {
+        final item = entry.value[i];
+        applySignal(item.account, item.position, signals[i]);
+      }
+    }
+    for (final account in accounts.values) {
       _recordEquity(
         account,
         EquityPoint(bar.time, _markToMarket(account, snapshot)),

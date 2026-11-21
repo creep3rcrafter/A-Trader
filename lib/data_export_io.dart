@@ -6,6 +6,7 @@ import 'dart:io';
 
 import 'mountain_time.dart';
 import 'run_data_export.dart';
+import 'checkpoint_archives.dart';
 
 final bool canExportRunData = Platform.isWindows;
 
@@ -99,7 +100,9 @@ Future<Map<String, dynamic>> _readNewestCheckpoint(Directory directory) async {
           leftTime ?? DateTime.fromMillisecondsSinceEpoch(0),
         );
       });
-      return candidates.first;
+      return CheckpointArchives(
+        Directory(_join(directory.path, 'state-archives')),
+      ).unpackState(candidates.first);
     }
     await Future<void>.delayed(const Duration(milliseconds: 200));
   }

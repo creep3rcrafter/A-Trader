@@ -4,6 +4,9 @@ A Flutter dashboard backed by a standalone Dart service. The Schwab integration
 provides the intended live market-data source; every order is simulated locally
 and no brokerage order is sent.
 The backend runs separately so closing the Flutter window does not stop a run.
+Dashboard and dialog text can be highlighted and copied with Ctrl+C or the
+selection menu. Error messages also offer **Copy error**, including training
+failures, backend notices, import dialogs, and export error notifications.
 
 Use **Simulation controls > Strategy instances > Add algorithm from file** to
 import a `.json` rules file or `.dart` algorithm. The app validates it, saves it,
@@ -17,6 +20,24 @@ not supported.
 The current algorithms live in individual Dart files under
 [lib/algorithms](lib/algorithms/README.md), with a shared catalogue for simulation
 and evolution.
+
+**Saved candle data:** the backend retains regular-session 1-minute candles in
+`%LOCALAPPDATA%\ATrader\candles\1m\<symbol>\YYYY-MM-DD.json.gz`. Simulations
+share this cache and download only missing days. **Download / reuse candle data**
+in Simulation controls can preload the selected watchlist/date range. Completed
+cached days work offline; the current day stays refreshable. While the backend
+is running and Schwab is authorized, it checks every five minutes for completed
+sessions, collects them after a 15-minute closing buffer, and catches up recent
+missing days. Initial collection covers roughly the last four weeks where data
+is available. Saved days are retained beyond the provider's download window;
+no automatic collection happens while the backend is closed.
+
+Completed generation/session replays are stored once as compressed files in
+`%LOCALAPPDATA%\ATrader\state-archives`. `state.json` references these files;
+keep that folder with the checkpoint when backing up application data. The app
+restores them automatically, and **Export all run data** still produces one
+complete JSON file including those generations. Historical jobs checkpoint at
+generation boundaries instead of repeatedly rewriting all results while tuning.
 
 ## Requirements
 
@@ -236,24 +257,48 @@ models remain long-only. New strategies need an updated backend restart.
 
 ### Historical strategy evolution
 
-Training saves its date range, downloaded market data, accepted parameters,
-completed generation replays, performance, mutation settings, and previous
-tested mutations with the source simulation. To continue, select the saved
-simulation, keep **Continue saved training** checked, enter a higher total
+Training saves its date range, downloaded market data, population, parentage,
+champion parameters, individual performance/equity/trades, completed generation
+replays, and mutation settings. The app uses one simulation setup; there is no
+simulation-profile picker or name/delete workflow. Changing a stopped setup
+archives its previous results for export. To continue, keep
+**Continue saved training** checked, enter a higher total
 in **Generations**, and click **Start**. Continuation starts after the last
 completed generation. Starting a fresh session keeps the earlier session
 in the simulation's training archive.
 
-**Evolution settings** exposes mutation size (1–200%), the probability of
-changing extra variables (0–100%), and candidates per generation (1–200).
-Candidate rank scales the mutation size and probability, so weaker candidates
-explore more broadly.
+Set **Population size** (2–200 variants per strategy) beside **Generations**.
+Each generation preserves unchanged elites and breeds children from the strongest
+parent pool using parameter crossover. **Evolution settings** exposes base mutation
+size (1–200%), its minimum floor, extra-variable mutation probability, elite
+percentage (1–50%), parent pool percentage (10–100%), and crossover probability.
+Weaker parents receive larger mutations. When a child improves profit and win
+rate together over its parents, its inherited solidification increases, reducing
+subsequent mutation toward the floor. Integer parameters stay integral and all
+values stay within the algorithm's declared limits.
+
+Fitness is return × (1 + win-rate/100) for profitable individuals, and return
+for losing individuals. This rewards profitable winners without rewarding losses
+for having a high win rate. A separate retained champion is replaced only when
+net profit and win rate are both non-decreasing and at least one improves on the
+same sample. This deliberately rejects profit/win-rate tradeoffs for the champion;
+other strong individuals can still breed. No closed trades means an unknown win
+rate (shown as a dash), treated as zero for selection.
+
+**Population performance** lists every individual in every saved generation:
+rank, parent IDs, profit, return, win rate, trade count, drawdown, fitness,
+effective mutation, and solidification. Select an individual for all performance
+metrics, variables, equity/drawdown charts and fills, or copy its JSON. Use the
+generation arrows and strategy selector to browse, or **Follow latest** for live
+updates. These records are included in the single JSON export and restored after
+a backend restart. Older sessions acquire a population when continued; earlier
+generations cannot retroactively show individuals that were never recorded.
 
 **Best saved strategy settings** bookmarks the highest observed net profit
 and highest win rate for every strategy, including tested candidates.
 Each bookmark shows the variables, generation, trade count, profit, and win
-rate. **New simulation from these settings** copies that strategy's recorded
-variables and time range into a saved simulation. Win rate ties use net
+rate. **Use these variables** copies that strategy's recorded
+variables and time range into the setup. Win rate ties use net
 profit. Both records are observations of the historical window.
 
 **Strategy variable changes** beneath the portfolio metrics follows the latest
@@ -271,15 +316,16 @@ selected range of 1-minute Schwab candles and starts when the previous one
 completes. The backend stops after the requested number of generations.
 If the window has too little data to tune, research ends early and shows why.
 
-Each generation tests mutations by net return after simulated trading costs.
-Stronger candidates get smaller changes, and weaker candidates get larger
-ones. A candidate carries forward when it improves return on the development
-data and holdout. The dashboard automatically follows the completed
+Each generation evaluates its population after simulated trading costs.
+The dashboard automatically follows the retained champion in completed
 generations and shows their candles, equity, drawdown, strategy metrics,
 positions, and decisions. The generation equity chart can show either the
-tested mutation or the settings accepted for each generation. The activity indicator shows progress while the next generation runs. Use **Stop** to end the job or the simulation picker
-to return to a saved run. **New simulation** can copy the preview's settings
-into a saved run.
+tested mutation or the champion accepted for each generation; it defaults to
+the champion. The activity indicator shows progress while the next generation
+runs. Use **Stop** to end the job. Fitness uses the full chosen training window;
+chronological segment metrics are diagnostics, not an independent acceptance
+holdout. Improvement on this repeated sample does not establish performance on
+unseen dates.
 
 The optional session-close policy checks each strategy portfolio's net
 liquidation P&L, including estimated exit costs, on its first synchronized fresh

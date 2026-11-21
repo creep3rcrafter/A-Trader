@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:atrader/historical_replay.dart';
+import 'package:atrader/checkpoint_archives.dart';
 import 'package:atrader/live_runtime.dart';
 import 'package:atrader/local_backend.dart';
 import 'package:atrader/mountain_time.dart';
@@ -219,6 +220,41 @@ void main() {
     expect(changes['strategies'], isNotEmpty);
     expect(changes['strategies'][0]['currentParameters'], isA<Map>());
     expect(changes['strategies'][0]['candidateParameters'], isA<Map>());
+    final population = await call(
+      'evolution/population?runId=$sourceId&generation=2',
+    );
+    expect(population['individuals'], hasLength(6));
+    final members = (population['individuals'] as List).cast<Map>();
+    expect(members.any((m) => m['elite'] == true), true);
+    expect(members.any((m) => (m['parents'] as List).length == 2), true);
+    expect(members.every((m) => !m.containsKey('account')), true);
+    final champion = members.singleWhere((m) => m['champion'] == true);
+    final detail = await call(
+      'evolution/population?runId=$sourceId&generation=2&individual=${champion['id']}',
+    );
+    expect(detail['individual']['account']['history'], isNotEmpty);
+    expect(detail['individual']['account']['events'], isNotEmpty);
+    final priorPopulation = await call(
+      'evolution/population?runId=$sourceId&generation=1',
+    );
+    final prior = (priorPopulation['individuals'] as List)
+        .cast<Map>()
+        .singleWhere((m) => m['champion'] == true);
+    expect(
+      champion['performance']['netProfit'],
+      greaterThanOrEqualTo(prior['performance']['netProfit'] as num),
+    );
+    expect(
+      champion['performance']['winRatePercent'],
+      greaterThanOrEqualTo(prior['performance']['winRatePercent'] as num),
+    );
+    final compact = await call('status');
+    expect(compact['workspaceMode'], true);
+    expect(compact['workspaceId'], sourceId);
+    expect(
+      compact['research']['lastResults'][0].containsKey('individuals'),
+      false,
+    );
     final refreshed = await call('snapshot');
     expect(refreshed['status']['research']['cycles'], greaterThanOrEqualTo(2));
     expect(refreshed['accounts'], isNotEmpty);
@@ -239,7 +275,7 @@ void main() {
     );
     expect(
       (strategy['history'] as List).last['trialValue'],
-      tested['tunedValidation']['endingEquity'],
+      tested['populationSummary']['candidatePerformance']['endingEquity'],
     );
     final original = await call('status?runId=$sourceId');
     expect(original['running'], isTrue);
@@ -296,7 +332,11 @@ void main() {
     expect((saved['runs'] as List).cast<Map>().map((row) => row['id']), [
       sourceId,
     ]);
-    final savedSource = (saved['runs'] as List).single as Map;
+    final packedSource = (saved['runs'] as List).single as Map;
+    expect(packedSource['generationResultsFiles'], hasLength(2));
+    final savedSource = await CheckpointArchives(
+      Directory('${directory.path}/state-archives'),
+    ).unpackRun(Map<String, dynamic>.from(packedSource));
     expect(savedSource['researchSession']['cycles'], 2);
     expect(savedSource['generationResults'], hasLength(2));
     expect(savedSource['strategyBests'], isNotEmpty);
@@ -333,6 +373,10 @@ void main() {
     await backend.start(port: port);
     final recovered = await call('status');
     expect(recovered['trainingSession']['cycles'], 2);
+    expect(
+      await call('evolution/population?runId=$sourceId&generation=2'),
+      population,
+    );
     final restoredChanges = await call(
       'runs/variable-changes?runId=$sourceId&generation=1',
     );
@@ -364,11 +408,65 @@ void main() {
         (afterResume['runs'] as List).single['researchSession']['cycles']
             as int;
     expect(completed, greaterThanOrEqualTo(3));
-    final allGenerations =
-        (afterResume['runs'] as List).single['generationResults'] as List;
+    final resumedSource =
+        await CheckpointArchives(
+          Directory('${directory.path}/state-archives'),
+        ).unpackRun(
+          Map<String, dynamic>.from(
+            (afterResume['runs'] as List).single as Map,
+          ),
+        );
+    final allGenerations = resumedSource['generationResults'] as List;
     expect(
       allGenerations.map((row) => row['generation']),
       List.generate(completed, (index) => index + 1),
     );
+
+    // A stopped setup is replaced in the same workspace. Its completed work
+    // remains in the export archive instead of creating another named profile.
+    backend = LocalBackend(
+      dataDirectory: directory,
+      secureStorage: _FixtureStorage(),
+      clock: () => DateTime.utc(2026, 5, 5, 15),
+      schwabApiFactory: (storage, onQuote, onState) => _HistoryFixture(
+        storage: storage,
+        onQuote: onQuote,
+        onState: onState,
+        releaseHistory: Future<void>.value(),
+      ),
+    );
+    stopped = false;
+    await backend.start(port: port);
+    await call('runs/select', {'runId': sourceId});
+    await call('run/stop', {});
+    await call('workspace/settings', {
+      'configuration': _configuration(4321, 1),
+    });
+    final workspace = await call('status');
+    expect(workspace['workspaceId'], sourceId);
+    expect(workspace['runId'], sourceId);
+    expect(workspace['workspaceRevision'], 1);
+    expect(workspace['runs'], hasLength(1));
+    expect(workspace['startingCash'], 4321);
+    expect(workspace['trainingSession'], null);
+    final archivedExport = await call('export');
+    final archives =
+        archivedExport['savedState']['runs'][0]['trainingArchive'] as List;
+    expect(archives, hasLength(1));
+    expect(
+      archives.single['simulation']['generationResults'],
+      hasLength(completed),
+    );
+    expect(
+      archives
+          .single['simulation']['generationResults'][0]['tuningResults'][0]['individuals'],
+      hasLength(6),
+    );
+    await call('workspace/settings', {
+      'configuration': _configuration(4567, 1),
+    });
+    expect((await call('status'))['runs'], hasLength(1));
+    await backend.stop();
+    stopped = true;
   });
 }

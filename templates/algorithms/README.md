@@ -129,6 +129,14 @@ reproducible training and resume; arbitrary object fields are not checkpointed.
 A decision exceeding five seconds stops its worker and records WAIT. Runtime
 errors also produce WAIT. Compilation errors are displayed in the app.
 
+Tuning and compatible generation replays execute whole chronological batches
+inside the compiled worker using the same simulator, risk, and fill rules. They
+report progress and have a two-minute batch timeout. Fatal worker/transport
+errors stop training with an error; they are not accepted as flat trading
+results. Existing Dart imports are recompiled automatically when the worker
+protocol changes. Live decisions share candle deltas and batched requests;
+Windows uses event notifications instead of polling between decisions.
+
 Native calls copy context to a worker, so JSON or built-in strategies generally
 have lower evaluation overhead. The synchronous Dart interface is designed for
 calculations; the existing LM Studio feature continues to handle asynchronous

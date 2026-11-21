@@ -58,6 +58,15 @@ class StrategyRegistry {
   static TradingStrategy byId(String id) =>
       all.firstWhere((strategy) => strategy.id == id);
 
+  static void checkExecutionHealth() {
+    for (final strategy in all) {
+      if (strategy is StrategyExecutionHealth) {
+        final error = (strategy as StrategyExecutionHealth).executionError;
+        if (error != null) throw StateError('${strategy.name}: $error');
+      }
+    }
+  }
+
   static final Set<String> builtinIds = all
       .map((strategy) => strategy.id)
       .toSet();

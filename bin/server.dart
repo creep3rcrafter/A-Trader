@@ -9,7 +9,7 @@ Future<void> main(List<String> arguments) async {
       .where((value) => value != '--background')
       .toList();
   final port = positional.isEmpty ? 8787 : int.parse(positional.single);
-  final backend = LocalBackend();
+  final backend = LocalBackend(autoCollectCandles: true);
   try {
     await backend.start(port: port);
   } catch (error) {

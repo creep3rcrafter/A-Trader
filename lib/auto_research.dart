@@ -9,6 +9,8 @@ import 'historical_replay.dart';
 import 'mountain_time.dart';
 import 'simulator.dart';
 import 'strategy_tuning.dart';
+import 'strategy_evolution.dart';
+import 'research_samples.dart';
 import 'algorithms/algorithm_library.dart';
 
 typedef HistoryFetcher =
@@ -75,6 +77,9 @@ class AutoResearch {
   int _cycles = 0;
   int _generations = 0;
   int? _evolutionLimit;
+  bool _continuous = false;
+  bool get _populationTraining => _continuous || _evolutionLimit != null;
+  String? _sampleLabel;
   String _message = 'Ready';
   _ResearchPhase _phase = _ResearchPhase.ready;
   double? _progress;
@@ -89,6 +94,8 @@ class AutoResearch {
   int _improvements = 0;
   int _tested = 0;
   List<Map<String, Object?>> _lastResults = [];
+  final _populations = <String, Map<String, dynamic>>{};
+  List<Map<String, Object?>> get latestResults => _lastResults;
 
   Map<String, Object?> get status => {
     'running': _stop != null && !_stop!.isCompleted,
@@ -103,6 +110,8 @@ class AutoResearch {
     'cycles': _cycles,
     'generations': _generations,
     'evolutionLimit': _evolutionLimit,
+    'continuous': _continuous,
+    'sampleLabel': _sampleLabel,
     'interval': 1,
     'rangeLabel': _historicalRange?.label,
     'start': _start?.toIso8601String(),
@@ -111,31 +120,42 @@ class AutoResearch {
     'lastInterval': _cycles == 0 ? null : 1,
     'improvements': _improvements,
     'candidatesTested': _tested,
-    'lastResults': _lastResults,
+    'lastResults': [
+      for (final result in _lastResults)
+        {
+          for (final entry in result.entries)
+            if (entry.key != 'individuals') entry.key: entry.value,
+        },
+    ],
     'configurations': {'1': ?_configuration},
   };
 
   Map<String, Object?> checkpoint() => {
     ...status,
+    if (!_continuous) 'lastResults': _lastResults,
+    'populations': Map.of(_populations),
     'source': _source,
+    'rangeStart': _historicalRange?.startUtc.toIso8601String(),
+    'rangeEnd': _historicalRange?.endUtc.toIso8601String(),
     'configuration': _configuration,
     'evolution': _evolution.toJson(),
-    'previousTrials': _previousTrials,
-    'fetchedAt': _fetchedAt?.toIso8601String(),
-    'history': {
-      for (final entry in _history.entries)
-        entry.key: [
-          for (final bar in entry.value)
-            {
-              'time': bar.openTime.toIso8601String(),
-              'open': bar.open,
-              'high': bar.high,
-              'low': bar.low,
-              'close': bar.close,
-              'volume': bar.volume,
-            },
-        ],
-    },
+    'previousTrials': Map.of(_previousTrials),
+    if (!_continuous) 'fetchedAt': _fetchedAt?.toIso8601String(),
+    if (!_continuous)
+      'history': {
+        for (final entry in _history.entries)
+          entry.key: [
+            for (final bar in entry.value)
+              {
+                'time': bar.openTime.toIso8601String(),
+                'open': bar.open,
+                'high': bar.high,
+                'low': bar.low,
+                'close': bar.close,
+                'volume': bar.volume,
+              },
+          ],
+      },
   };
 
   void restoreCheckpoint(Map<String, dynamic> saved) {
@@ -149,11 +169,21 @@ class AutoResearch {
     _cycles = saved['cycles'] as int? ?? 0;
     _generations = saved['generations'] as int? ?? 1;
     _evolutionLimit = saved['evolutionLimit'] as int?;
+    _continuous = saved['continuous'] == true;
+    _sampleLabel = saved['sampleLabel'] as String?;
     _evolution = EvolutionSettings.fromJson(
       saved['evolution'] as Map<String, dynamic>?,
     );
     _lastResults = (saved['lastResults'] as List? ?? [])
         .cast<Map<String, dynamic>>();
+    _populations
+      ..clear()
+      ..addAll(
+        (saved['populations'] as Map? ?? const {}).map(
+          (key, value) =>
+              MapEntry(key as String, Map<String, dynamic>.from(value as Map)),
+        ),
+      );
     _previousTrials.clear();
     for (final entry in (saved['previousTrials'] as Map? ?? const {}).entries) {
       _previousTrials[entry.key as String] = [
@@ -165,10 +195,12 @@ class AutoResearch {
     }
     _start = DateTime.tryParse(saved['start']?.toString() ?? '');
     _end = DateTime.tryParse(saved['end']?.toString() ?? '');
-    _historicalRange = _start != null && _end != null
+    final rangeStart = DateTime.tryParse('${saved['rangeStart']}') ?? _start;
+    final rangeEnd = DateTime.tryParse('${saved['rangeEnd']}') ?? _end;
+    _historicalRange = rangeStart != null && rangeEnd != null
         ? (
-            startUtc: _start!,
-            endUtc: _end!,
+            startUtc: rangeStart,
+            endUtc: rangeEnd,
             label: saved['rangeLabel'] as String? ?? 'Saved training range',
           )
         : null;
@@ -200,12 +232,18 @@ class AutoResearch {
     required List<StrategySettings> strategies,
     required int generations,
     int? evolutionLimit,
+    bool continuous = false,
     HistoricalRange? historicalRange,
     EvolutionSettings evolution = const EvolutionSettings(),
     Map<String, dynamic>? resume,
   }) {
     if (_stop != null) {
       throw StateError('Wait for the current research cycle to finish.');
+    }
+    if (continuous && (historicalRange == null || evolutionLimit != null)) {
+      throw ArgumentError(
+        'Continuous training needs a historical range and no generation limit.',
+      );
     }
     if (resume != null) {
       restoreCheckpoint(resume);
@@ -231,18 +269,26 @@ class AutoResearch {
     final benchmarks = BenchmarkSettings.fromJson(
       source['benchmarks'] as Map<String, dynamic>?,
     );
+    if (continuous && eligible.isEmpty) {
+      throw StateError(
+        'Enable a strategy that supports evolution before starting continuous training.',
+      );
+    }
     if (eligible.isEmpty && !benchmarks.buyAndHold && !benchmarks.equalWeight) {
       throw StateError(
         'Enable a benchmark or a strategy that supports historical replay first.',
       );
     }
     final stop = _stop = Completer<void>();
+    _continuous = continuous;
+    _sampleLabel = null;
     _source = source;
     _evolution = evolution;
     if (resume == null) {
       _sessionId = '${DateTime.now().microsecondsSinceEpoch}';
       _configuration = null;
       _previousTrials.clear();
+      _populations.clear();
       _history = {};
       _fetchedAt = null;
       _cycles = _improvements = _tested = 0;
@@ -287,6 +333,7 @@ class AutoResearch {
   ) async {
     final watchlist = (source['watchlist'] as List).cast<String>();
     final risk = TuningRisk.fromSettings(source);
+    ResearchSamples? samples;
     try {
       while (!stop.isCompleted) {
         try {
@@ -309,7 +356,7 @@ class AutoResearch {
             for (final symbol in watchlist) {
               _setActivity(
                 _ResearchPhase.downloading,
-                'Downloading Schwab history',
+                'Loading 1-minute history (saved data first)',
                 progress: downloaded.length / watchlist.length,
                 detail:
                     '$symbol · ${downloaded.length + 1} of ${watchlist.length} symbols',
@@ -325,6 +372,14 @@ class AutoResearch {
             }
             _history = downloaded;
             _fetchedAt = now;
+          }
+          ResearchSample? sample;
+          if (_continuous) {
+            samples ??= ResearchSamples(historicalRange!, _history);
+            sample = samples.choose(_random);
+            _start = sample.range.startUtc;
+            _end = sample.range.endUtc;
+            _sampleLabel = sample.range.label;
           }
           final existing = _configuration;
           final parametersByLabel = {
@@ -349,7 +404,7 @@ class AutoResearch {
           _setActivity(
             _ResearchPhase.tuning,
             'Retuning strategies',
-            detail: 'Preparing the candle sample',
+            detail: _sampleLabel ?? 'Preparing the candle sample',
           );
           final progressPort = ReceivePort();
           progressPort.listen((message) {
@@ -361,14 +416,14 @@ class AutoResearch {
                   : 'Retuning strategies',
               progress: message.progress,
               remainingSeconds: message.remainingSeconds,
-              detail: message.detail,
+              detail: [?_sampleLabel, ?message.detail].join(' · '),
             );
           });
           final ({List<StrategyTuningResult> results, SimulatorEngine? preview})
           cycle;
           try {
             cycle = await _researchInIsolate(
-              history: _history,
+              history: sample?.history ?? _history,
               start: _start!,
               end: _end!,
               watchlist: watchlist,
@@ -381,12 +436,20 @@ class AutoResearch {
               evolution: _evolution,
               progressPort: progressPort.sendPort,
               algorithms: algorithmDefinitions?.call() ?? const [],
+              populations: _populations,
+              populationGeneration: _populationTraining ? _cycles + 1 : null,
+              changingSample: _continuous,
             );
           } finally {
             progressPort.close();
           }
           if (stop.isCompleted) return;
           final results = cycle.results;
+          for (final result in results) {
+            if (result.populationState case final state?) {
+              _populations[result.label] = Map<String, dynamic>.from(state);
+            }
+          }
           if (_evolutionLimit != null) {
             for (final result in results) {
               if (result.candidateParameters case final trial?) {
@@ -446,7 +509,8 @@ class AutoResearch {
                 ],
               },
               engine,
-              historicalRange ??
+              sample?.range ??
+                  historicalRange ??
                   (
                     startUtc: start,
                     endUtc: end,
@@ -456,7 +520,7 @@ class AutoResearch {
                   ),
             );
           }
-          if (_evolutionLimit case final limit?) {
+          if (_populationTraining) {
             onCheckpoint?.call();
             if (_tested == 0) {
               _setActivity(
@@ -469,7 +533,7 @@ class AutoResearch {
               );
               return;
             }
-            if (_cycles >= limit) {
+            if (_evolutionLimit case final limit? when _cycles >= limit) {
               _setActivity(_ResearchPhase.complete, 'Generations complete');
               return;
             }
@@ -477,7 +541,7 @@ class AutoResearch {
         } catch (error) {
           if (stop.isCompleted) return;
           _setActivity(_ResearchPhase.error, 'Research cycle failed: $error');
-          if (_evolutionLimit != null) return;
+          if (_populationTraining) return;
         }
         final delay =
             cycleDelay == Duration.zero &&
@@ -523,9 +587,18 @@ _researchInIsolate({
   required EvolutionSettings evolution,
   required SendPort progressPort,
   required List<Map<String, dynamic>> algorithms,
+  required Map<String, Map<String, dynamic>> populations,
+  required int? populationGeneration,
+  required bool changingSample,
 }) => Isolate.run(() async {
   final library = AlgorithmLibrary(Directory.systemTemp);
-  await library.restore(algorithms);
+  final strategyIds = strategies.map((setting) => setting.strategyId).toSet();
+  // Unused imports should not start workers or block a replay.
+  await library.restore([
+    for (final definition in algorithms)
+      if (strategyIds.contains((definition['metadata'] as Map?)?['id']))
+        definition,
+  ]);
   try {
     const minute = Duration(minutes: 1);
     final candles = {
@@ -546,26 +619,38 @@ _researchInIsolate({
               ),
         ],
     };
-    final results =
-        StrategyTuner(
-          candlesByInterval: {1: candles},
-          watchlist: watchlist,
-          strategies: strategies,
-          risk: risk,
-          generations: generations,
-          seed: seed,
-          optimizeNetReturn: true,
-          previousTrials: previousTrials,
-          evolution: evolution,
-          randomCandidates: evolution.candidatesPerGeneration,
-        ).run(
-          onProgress: (progress) => progressPort.send((
-            phase: _ResearchPhase.tuning,
-            progress: progress.fraction,
-            remainingSeconds: progress.remainingSeconds,
-            detail: null,
-          )),
-        );
+    if (populationGeneration != null &&
+        candles.values.every((bars) => bars.isEmpty)) {
+      return (results: <StrategyTuningResult>[], preview: null);
+    }
+    final tuner = StrategyTuner(
+      candlesByInterval: {1: candles},
+      watchlist: watchlist,
+      strategies: strategies,
+      risk: risk,
+      generations: generations,
+      seed: seed,
+      optimizeNetReturn: true,
+      previousTrials: previousTrials,
+      evolution: evolution,
+      randomCandidates: evolution.candidatesPerGeneration,
+    );
+    void progress(TuningProgress progress) => progressPort.send((
+      phase: _ResearchPhase.tuning,
+      progress: progress.fraction,
+      remainingSeconds: progress.remainingSeconds,
+      detail: populationGeneration == null
+          ? null
+          : 'Generation $populationGeneration · ${evolution.populationSize} variants per strategy',
+    ));
+    final results = populationGeneration == null
+        ? tuner.run(onProgress: progress)
+        : StrategyEvolution(
+            tuner: tuner,
+            generation: populationGeneration,
+            populations: populations,
+            changingSample: changingSample,
+          ).run(onProgress: progress);
     if (!recordPreview || candles.values.every((bars) => bars.isEmpty)) {
       return (results: results, preview: null);
     }
@@ -573,7 +658,7 @@ _researchInIsolate({
     final acceptedParameters = {
       for (final result in results) result.label: result.tunedParameters,
     };
-    final preview = risk.createEngine(
+    var preview = risk.createEngine(
       watchlist: watchlist,
       strategies: [
         for (final strategy in strategies)
@@ -589,6 +674,50 @@ _researchInIsolate({
       includeBenchmarks: true,
     );
     final bars = orderedReplayCandles(watchlist, candles);
+    final nativeStrategies = {
+      for (final setting in preview.strategies)
+        if (StrategyRegistry.byId(setting.strategyId)
+            is CandidateReplayStrategy)
+          StrategyRegistry.byId(setting.strategyId),
+    };
+    if (nativeStrategies.length == 1 &&
+        preview.strategies.every(
+          (setting) =>
+              StrategyRegistry.builtinIds.contains(setting.strategyId) ||
+              setting.strategyId == nativeStrategies.single.id,
+        )) {
+      final native = nativeStrategies.single as CandidateReplayStrategy;
+      final replay = native.replayCandidates(
+        checkpoint: preview.checkpoint(),
+        strategies: [
+          for (final setting in preview.strategies)
+            {
+              'strategyId': setting.strategyId,
+              'label': setting.label,
+              'parameters': setting.parameters,
+              'intervalMinutes': setting.intervalMinutes,
+              'startingCash': setting.startingCash,
+            },
+        ],
+        bars: bars,
+        cuts: const [],
+        retainEvents: true,
+        onProgress: (completed) => progressPort.send((
+          phase: _ResearchPhase.replaying,
+          progress: completed / bars.length,
+          remainingSeconds: null,
+          detail: '$completed of ${bars.length} candles',
+        )),
+      );
+      preview = SimulatorEngine.restore(
+        watchlist: watchlist,
+        strategies: preview.strategies,
+        startingCash: preview.startingCash,
+        checkpoint: Map<String, dynamic>.from(replay['checkpoint'] as Map),
+      );
+      preview = _championPreview(preview, results);
+      return (results: results, preview: preview);
+    }
     final replayClock = Stopwatch()..start();
     var nextProgressAt = 0;
     for (var index = 0; index < bars.length; index++) {
@@ -605,9 +734,45 @@ _researchInIsolate({
         nextProgressAt = elapsed + 250;
       }
       preview.process(bars[index]);
+      StrategyRegistry.checkExecutionHealth();
     }
-    return (results: results, preview: preview);
+    return (results: results, preview: _championPreview(preview, results));
   } finally {
     await library.close();
   }
 });
+
+// Use the evaluated individual's account for the dashboard, including imported
+// algorithms with mutable state. Replaying a stochastic algorithm cannot change
+// the profit recorded for the retained champion.
+SimulatorEngine _championPreview(
+  SimulatorEngine preview,
+  List<StrategyTuningResult> results,
+) {
+  if (results.every((r) => r.populationState == null)) return preview;
+  final checkpoint = preview.checkpoint();
+  final accounts = Map<String, dynamic>.from(checkpoint['accounts'] as Map);
+  checkpoint['accounts'] = accounts;
+  for (final result in results) {
+    final champion = result.individuals
+        .where((m) => m['id'] == result.championId)
+        .firstOrNull;
+    if (champion != null) {
+      final account = Map<String, Object?>.from(champion['account'] as Map);
+      account['events'] = [
+        for (final event in account['events'] as List? ?? const [])
+          <String, Object?>{
+            ...Map<String, Object?>.from(event as Map),
+            'strategy': result.label,
+          },
+      ];
+      accounts[result.label] = account;
+    }
+  }
+  return SimulatorEngine.restore(
+    watchlist: preview.watchlist,
+    strategies: preview.strategies,
+    startingCash: preview.startingCash,
+    checkpoint: Map<String, dynamic>.from(checkpoint),
+  );
+}

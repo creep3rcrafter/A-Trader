@@ -5,15 +5,36 @@ import 'dart:math' as math;
 
 import 'package:atrader/algorithms/algorithm_library.dart';
 import 'package:atrader/algorithms/json_algorithm.dart';
+import 'package:atrader/algorithms/native_algorithm.dart';
 import 'package:atrader/algorithms/registry.dart';
 import 'package:atrader/auto_research.dart';
 import 'package:atrader/historical_replay.dart';
 import 'package:atrader/local_backend.dart';
 import 'package:atrader/secure_storage.dart';
 import 'package:atrader/strategy_api.dart';
-import 'package:atrader/simulator.dart' show StrategySettings;
+import 'package:atrader/simulator.dart' show StrategySettings, SimulatorEngine;
 import 'package:atrader/strategy_tuning.dart';
 import 'package:flutter_test/flutter_test.dart';
+import '../templates/algorithms/strategy_template.dart' as template;
+
+class _LockedStartupFile implements File {
+  _LockedStartupFile(this.lockedReads);
+  int lockedReads;
+
+  @override
+  Future<String> readAsString({Encoding encoding = utf8}) async {
+    if (lockedReads-- > 0) {
+      throw const PathAccessException(
+        'ready.json',
+        OSError('The file is being used by another process', 32),
+      );
+    }
+    return '{"id":"test_algorithm"}';
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
 
 Map<String, dynamic> example({String id = 'imported_sma'}) => {
   'format': 'atrader.algorithm',
@@ -82,8 +103,46 @@ class _EmptyStorage extends SecureStorage {
   Future<Map<String, String>> load() async => {};
 }
 
+Future<(String, double?)> _decisionInFreshIsolate(
+  List<Map<String, dynamic>> definitions,
+) => Isolate.run(() async {
+  final isolated = AlgorithmLibrary(Directory.systemTemp);
+  await isolated.restore(definitions);
+  try {
+    final signal = StrategyRegistry.byId(
+      'template_sma',
+    ).evaluate(context([100, 100, 100, 104], parameters: {'lookback': 4}));
+    return (signal.action.name, signal.stop);
+  } finally {
+    await isolated.close();
+  }
+});
+
 void main() {
   tearDown(() => StrategyRegistry.replaceImported([]));
+
+  test(
+    'native worker waits out a Windows startup file lock',
+    () async {
+      expect(await readNativeAlgorithmReady(_LockedStartupFile(2)), {
+        'id': 'test_algorithm',
+      });
+      await expectLater(
+        readNativeAlgorithmReady(
+          _LockedStartupFile(100),
+          timeout: const Duration(milliseconds: 25),
+        ),
+        throwsA(
+          isA<NativeAlgorithmWorkerFailure>().having(
+            (error) => error.message,
+            'message',
+            contains('Startup file stayed locked'),
+          ),
+        ),
+      );
+    },
+    skip: !Platform.isWindows,
+  );
 
   test(
     'JSON rules use math, tunable defaults, closed bars, and position exits',
@@ -326,7 +385,11 @@ void main() {
           ),
         );
         await research.stopped.timeout(const Duration(seconds: 20));
-        expect(research.status['phase'], 'complete');
+        expect(
+          research.status['phase'],
+          'complete',
+          reason: '${research.status['message']}',
+        );
         final result = (research.status['lastResults'] as List).single as Map;
         expect(result['strategyId'], 'imported_sma');
         expect(result['status'], isNot('skipped'));
@@ -354,18 +417,159 @@ void main() {
           ).readAsString(),
         );
         final saved = jsonDecode(jsonEncode(library.definitions)) as List;
-        final result = await Isolate.run(() async {
-          final isolated = AlgorithmLibrary(Directory.systemTemp);
-          await isolated.restore(saved.cast<Map<String, dynamic>>());
-          try {
-            final signal = StrategyRegistry.byId('template_sma').evaluate(
-              context([100, 100, 100, 104], parameters: {'lookback': 4}),
-            );
-            return (signal.action.name, signal.stop);
-          } finally {
-            await isolated.close();
-          }
-        });
+        final native = StrategyRegistry.byId('template_sma') as NativeAlgorithm;
+        final engine = SimulatorEngine(
+          watchlist: ['SOXL'],
+          startingCash: 10000,
+          includeBenchmarks: false,
+          strategies: [
+            for (var i = 0; i < 24; i++)
+              StrategySettings(strategyId: native.id, label: 'candidate $i'),
+          ],
+        );
+        for (var i = 0; i < 210; i++) {
+          engine.process(
+            Candle(
+              symbol: 'SOXL',
+              time: DateTime.utc(2026, 5, 4, 14, i),
+              open: 100,
+              high: 102,
+              low: 98,
+              close: 100 + math.sin(i / 4),
+              volume: 1000,
+            ),
+          );
+        }
+        expect(
+          native.workerRequestCount,
+          11,
+          reason:
+              '24 candidates should share one request per candle after warm-up.',
+        );
+        expect(native.executionError, isNull);
+        final settings = [
+          for (var i = 0; i < 3; i++)
+            StrategySettings(
+              strategyId: native.id,
+              label: 'replay $i',
+              parameters: {'entryThreshold': i * .005},
+            ),
+        ];
+        final direct = SimulatorEngine(
+          watchlist: ['SOXL'],
+          startingCash: 10000,
+          strategies: settings,
+          includeBenchmarks: false,
+          strategyOverrides: {native.id: const template.TemplateSmaStrategy()},
+        );
+        final bars = [
+          for (var i = 0; i < 240; i++)
+            Candle(
+              symbol: 'SOXL',
+              time: DateTime.utc(2026, 5, 4, 14, i),
+              open: 100,
+              high: 106,
+              low: 94,
+              close: 100 + 5 * math.sin(i / 4),
+              volume: 1000,
+            ),
+        ];
+        for (final bar in bars) {
+          direct.process(bar);
+        }
+        final seed = SimulatorEngine(
+          watchlist: ['SOXL'],
+          startingCash: 10000,
+          strategies: settings,
+          includeBenchmarks: false,
+        );
+        final requestsBefore = native.workerRequestCount;
+        final replay = native.replayCandidates(
+          checkpoint: seed.checkpoint(),
+          strategies: [
+            for (final setting in settings)
+              {
+                'strategyId': setting.strategyId,
+                'label': setting.label,
+                'parameters': setting.parameters,
+                'intervalMinutes': 1,
+                'startingCash': null,
+              },
+          ],
+          bars: bars,
+          cuts: const [],
+          retainEvents: true,
+        );
+        expect(native.workerRequestCount, requestsBefore + 1);
+        expect(
+          (replay['checkpoint'] as Map)['accounts'],
+          direct.checkpoint()['accounts'],
+          reason:
+              'Compiled replay must preserve fills, equity, positions and decisions.',
+        );
+        final research = AutoResearch(
+          clock: () => DateTime.utc(2026, 5, 6),
+          algorithmDefinitions: () => List.of(library.definitions),
+          onPreview: (_, engine, _) {
+            expect(engine.accounts['Native research']!.events, isNotEmpty);
+          },
+          fetch:
+              ({required symbol, required startUtc, required endUtc}) async => [
+                for (var i = 0; i < 390; i++)
+                  MinuteBar(
+                    symbol: symbol,
+                    openTime: DateTime.utc(2026, 5, 4, 13, 30 + i),
+                    open: 100,
+                    high: 106,
+                    low: 94,
+                    close: 100 + 5 * math.sin(i / 4),
+                    volume: 1000,
+                  ),
+              ],
+        );
+        final nativeSettings = StrategySettings(
+          strategyId: native.id,
+          label: 'Native research',
+        );
+        research.start(
+          runName: 'Native fast replay',
+          configuration: {
+            'watchlist': ['SOXL'],
+            'strategies': [
+              {
+                'strategyId': native.id,
+                'label': nativeSettings.label,
+                'enabled': true,
+                'intervalMinutes': 1,
+                'parameters': <String, double>{},
+              },
+            ],
+          },
+          strategies: [nativeSettings],
+          generations: 0,
+          evolutionLimit: 1,
+          historicalRange: (
+            startUtc: DateTime.utc(2026, 5, 4, 13, 30),
+            endUtc: DateTime.utc(2026, 5, 4, 20),
+            label: 'Test',
+          ),
+        );
+        await research.stopped.timeout(const Duration(seconds: 20));
+        expect(
+          research.status['phase'],
+          'complete',
+          reason: '${research.status['message']}',
+        );
+        expect(research.status['cycles'], 1);
+        expect(
+          engine.accounts.values.map(
+            (a) => a.events.where((e) => e.kind == 'signal').length,
+          ),
+          everyElement(210),
+        );
+        final result = await _decisionInFreshIsolate(
+          saved.cast<Map<String, dynamic>>(),
+        );
         expect(result.$1, 'buy');
         expect(result.$2, closeTo(101.92, 1e-9));
         await library.close();
@@ -375,6 +579,18 @@ void main() {
           StrategyRegistry.byId('template_sma').name,
           'Template: SMA distance',
         );
+        final restored =
+            StrategyRegistry.byId('template_sma') as NativeAlgorithm;
+        await restored.close();
+        expect(
+          restored
+              .evaluate(
+                context([100, 100, 100, 104], parameters: {'lookback': 4}),
+              )
+              .action,
+          TradeAction.wait,
+        );
+        expect(StrategyRegistry.checkExecutionHealth, throwsStateError);
       } finally {
         await library.close();
         await directory.delete(recursive: true);

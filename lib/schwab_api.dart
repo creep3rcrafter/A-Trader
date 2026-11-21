@@ -526,8 +526,8 @@ class SchwabApi {
   ///
   /// Uses Market Data `GET /marketdata/v1/pricehistory`. Schwab keeps only a
   /// limited window of minute history (roughly the last month) and returns
-  /// split-adjusted prices. Results are kept in memory by the caller and are
-  /// never written to disk.
+  /// split-adjusted prices. The backend's CandleHistoryCache persists completed
+  /// daily downloads and shares them across simulations.
   Future<List<MinuteBar>> fetchMinuteBars({
     required String symbol,
     required DateTime startUtc,

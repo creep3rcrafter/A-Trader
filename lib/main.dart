@@ -5,12 +5,15 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'backend_api.dart';
+import 'copyable_text.dart';
 import 'algorithm_file_picker.dart';
 import 'algorithms/imported_definition.dart';
 import 'data_export.dart';
 import 'mountain_time.dart';
 import 'simulator.dart';
 import 'strategy_tuning.dart' show maxTuningGenerations, EvolutionSettings;
+
+part 'population_performance.dart';
 
 void main() => runApp(const MyApp());
 
@@ -45,7 +48,7 @@ class _MyAppState extends State<MyApp> {
       themeMode: _controller.themeMode,
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
-      home: SimulatorHome(controller: _controller),
+      home: SelectionArea(child: SimulatorHome(controller: _controller)),
     ),
   );
 
@@ -125,7 +128,7 @@ Future<void> _exportRunData(
     if (!context.mounted) return;
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(
-      SnackBar(content: Text('Could not export run data: $error')),
+      copyableErrorSnackBar(context, 'Could not export run data: $error'),
     );
   }
 }
@@ -139,7 +142,7 @@ Future<void> _openRunDataExportFolder(
   } catch (error) {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Could not open export folder: $error')),
+      copyableErrorSnackBar(context, 'Could not open export folder: $error'),
     );
   }
 }
@@ -213,6 +216,10 @@ class DashboardController extends ChangeNotifier {
 
   bool get supportsRuns => status['runs'] is List && status['runId'] != null;
   bool get isResearchPreview => status['researchPreview'] == true;
+  bool get workspaceMode => status['workspaceMode'] == true;
+  String get setupIdentity => workspaceMode
+      ? '${status['workspaceId']}:${status['workspaceRevision'] ?? 0}'
+      : '${status['runId']}';
   bool get supportsTraining => status['training'] is Map;
   bool get supportsMountainHistoricalReplay =>
       status['historicalTimeZones'] is List &&
@@ -240,11 +247,14 @@ class DashboardController extends ChangeNotifier {
     Map<String, Object?> configuration, {
     String? name,
     Map<String, Object?>? historicalRange,
-  }) => _changeRun('/api/runs/create', {
-    'configuration': configuration,
-    'name': ?name,
-    'historicalRange': ?historicalRange,
-  });
+  }) => _changeRun(
+    workspaceMode ? '/api/workspace/settings' : '/api/runs/create',
+    {
+      'configuration': configuration,
+      if (!workspaceMode) 'name': ?name,
+      'historicalRange': ?historicalRange,
+    },
+  );
 
   Future<void> setAutoResearch(
     bool enabled, {
@@ -255,13 +265,14 @@ class DashboardController extends ChangeNotifier {
     TimeOfDay? endTime,
     EvolutionSettings evolution = const EvolutionSettings(),
     bool resume = false,
+    bool continuous = false,
   }) async {
     await api.post(
       enabled ? '/api/research/start' : '/api/research/stop',
       enabled
           ? {
-              'runId': status['runId'],
-              'evolutions': generations,
+              'runId': status['workspaceId'] ?? status['runId'],
+              if (continuous) 'continuous': true else 'evolutions': generations,
               'evolution': evolution.toJson(),
               'resume': resume,
               'configuration': ?configuration,
@@ -300,6 +311,20 @@ class DashboardController extends ChangeNotifier {
   Future<void> trainNow() async {
     await api.post('/api/training/train', const {});
     await refresh();
+  }
+
+  Future<Map<String, dynamic>> downloadCandleData(
+    List<String> symbols,
+    DateTimeRange range, {
+    TimeOfDay? startTime,
+    TimeOfDay? endTime,
+  }) async {
+    final result = await api.post('/api/history/download', {
+      'watchlist': symbols,
+      ..._historicalRequest(range, startTime: startTime, endTime: endTime),
+    });
+    await refresh();
+    return result;
   }
 
   void start() {
@@ -384,6 +409,12 @@ class DashboardController extends ChangeNotifier {
   }
 
   Future<void> saveRun(Map<String, Object?> configuration) async {
+    if (workspaceMode) {
+      await _changeRun('/api/workspace/settings', {
+        'configuration': configuration,
+      });
+      return;
+    }
     await api.post('/api/settings/run', configuration);
     await refresh();
   }
@@ -588,7 +619,7 @@ class SimulatorHome extends StatelessWidget {
           const SizedBox(width: 8),
           IconButton(
             tooltip: 'Settings',
-            onPressed: () => showDialog<void>(
+            onPressed: () => showSelectableDialog<void>(
               context: context,
               builder: (_) => SettingsDialog(controller: controller),
             ),
@@ -630,7 +661,7 @@ class _RunManagerState extends State<_RunManager> {
 
   Future<String?> _askName({String? current}) {
     var name = current ?? '';
-    return showDialog<String>(
+    return showSelectableDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(current == null ? 'New simulation' : 'Rename simulation'),
@@ -659,7 +690,7 @@ class _RunManagerState extends State<_RunManager> {
   }
 
   Future<void> _delete(String id, String name) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showSelectableDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Delete $name?'),
@@ -817,7 +848,7 @@ class _RunManagerState extends State<_RunManager> {
             ],
           ),
           if (_error != null)
-            Text(
+            CopyableError(
               _error!,
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
@@ -924,7 +955,7 @@ class _TrainingPanelState extends State<_TrainingPanel> {
                 label: const Text('Train now'),
               ),
               if (_error != null)
-                Text(
+                CopyableError(
                   _error!,
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
@@ -999,15 +1030,18 @@ class _SimulationControlsState extends State<_SimulationControls>
   Widget build(BuildContext context) {
     super.build(context);
     final controller = widget.controller;
-    final researchPreview = controller.isResearchPreview;
-    if (!researchPreview) _setupRunId = controller.status['runId'];
+    final researchPreview =
+        controller.isResearchPreview && !controller.workspaceMode;
+    if (!researchPreview) {
+      _setupRunId = controller.setupIdentity;
+    }
     return Card(
       child: ExpansionTile(
         title: const Text('Simulation controls'),
         subtitle: Text(
           researchPreview
               ? 'Select a simulation to change the dashboard view'
-              : 'Select a run, start or stop, and configure simulations',
+              : 'Configure the simulation, population, and generations',
         ),
         onExpansionChanged: (expanded) {
           if (expanded && !_opened) {
@@ -1102,7 +1136,7 @@ class _StrategyBestsState extends State<_StrategyBests> {
     child: ExpansionTile(
       title: const Text('Best saved strategy settings'),
       children: [
-        if (_error != null) Text(_error!),
+        if (_error != null) CopyableError(_error!),
         for (final entry in widget.bests.entries)
           for (final metric in ['profit', 'winRate'])
             if ((entry.value as Map)[metric] case final Map record)
@@ -1131,7 +1165,11 @@ class _StrategyBestsState extends State<_StrategyBests> {
                       onPressed: _busy
                           ? null
                           : () => _use('${entry.key}', record),
-                      child: const Text('New simulation from these settings'),
+                      child: Text(
+                        widget.controller.workspaceMode
+                            ? 'Use these variables'
+                            : 'New simulation from these settings',
+                      ),
                     ),
                   ],
                 ),
@@ -1304,7 +1342,7 @@ class _GenerationChangesState extends State<_GenerationChanges>
             onChanged: (value) => setState(() => _showUnchanged = value!),
           ),
           if (_loading) const LinearProgressIndicator(),
-          if (_error != null) Text(_error!),
+          if (_error != null) CopyableError(_error!),
           for (final row in (selected['strategies'] as List).cast<Map>())
             _strategy(row),
         ],
@@ -1394,14 +1432,23 @@ class _SimulationActivity extends StatelessWidget {
                     ? _fraction(status['replayProgress'])
                     : null,
                 working: historical && running,
+                errorText:
+                    runStatus != null &&
+                        runStatus.toLowerCase().contains('failed')
+                    ? runStatus
+                    : null,
               ),
             if (showResearch)
               _ActivityRow(
-                title: 'Automatic research',
+                title: research?['continuous'] == true
+                    ? 'Continuous research'
+                    : 'Automatic research',
                 stage: researchStage,
                 details: [
                   if (research?['evolutionLimit'] case final int limit)
                     '${research?['cycles'] ?? 0} of $limit generations processed',
+                  if (research?['continuous'] == true)
+                    '${research?['cycles'] ?? 0} generations processed',
                   if (research?['detail'] case final String detail
                       when detail.isNotEmpty && detail != researchStage)
                     detail,
@@ -1423,6 +1470,9 @@ class _SimulationActivity extends StatelessWidget {
                     ? (research?['remainingSeconds'])
                     : null,
                 working: researchWork,
+                errorText: phase == 'error'
+                    ? (research?['message'])?.toString()
+                    : null,
               ),
             if (manualTuning != null)
               _ActivityRow(
@@ -1452,6 +1502,7 @@ class _ActivityRow extends StatelessWidget {
     this.progress,
     this.remaining,
     this.working = false,
+    this.errorText,
   });
 
   final String title;
@@ -1461,6 +1512,7 @@ class _ActivityRow extends StatelessWidget {
   final double? progress;
   final Object? remaining;
   final bool working;
+  final String? errorText;
 
   @override
   Widget build(BuildContext context) {
@@ -1518,6 +1570,7 @@ class _ActivityRow extends StatelessWidget {
               ],
             ),
           ),
+          if (errorText != null) CopyErrorButton(errorText!),
         ],
       ),
     );
@@ -1525,7 +1578,7 @@ class _ActivityRow extends StatelessWidget {
 }
 
 class _DashboardViewState extends State<DashboardView> {
-  bool _showTrialEquity = true;
+  bool _showTrialEquity = false;
   bool dollars = true;
   int sortColumn = 2;
   bool ascending = false;
@@ -1584,15 +1637,18 @@ class _DashboardViewState extends State<DashboardView> {
           ],
         ),
         const SizedBox(height: 10),
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Text(
-            'Simulation: ${selectedRun?['name'] ?? widget.controller.status['runName'] ?? widget.controller.status['runId'] ?? 'Not selected'}',
-            style: Theme.of(context).textTheme.titleMedium,
+        if (!widget.controller.workspaceMode)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text(
+              'Simulation: ${selectedRun?['name'] ?? widget.controller.status['runName'] ?? widget.controller.status['runId'] ?? 'Not selected'}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
           ),
-        ),
         _SimulationActivity(status: widget.controller.status),
         _SimulationControls(controller: widget.controller),
+        if (widget.controller.workspaceMode)
+          PopulationPerformance(controller: widget.controller),
         if (widget.controller.status['strategyBests'] case final Map bests
             when bests.isNotEmpty)
           _StrategyBests(controller: widget.controller, bests: bests),
@@ -1677,8 +1733,8 @@ class _DashboardViewState extends State<DashboardView> {
                   ),
                   Text(
                     _showTrialEquity
-                        ? 'Ending equity of the candidate tested in each generation'
-                        : 'Ending equity after each generation’s validation',
+                        ? 'Ending equity of the highest-fitness candidate in each generation'
+                        : 'Ending equity of the retained champion after each generation',
                   ),
                   const SizedBox(height: 8),
                   SizedBox(
@@ -1808,44 +1864,48 @@ class _DashboardViewState extends State<DashboardView> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final columns = constraints.maxWidth > 1000 ? 4 : 2;
-        return GridView.count(
-          crossAxisCount: columns,
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: columns == 4
-              ? 1.9
-              : constraints.maxWidth < 500
-              ? 1.3
-              : 2.4,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
+        const spacing = 12.0;
+        final width =
+            (constraints.maxWidth - (columns - 1) * spacing) / columns;
+        final aspectRatio = columns == 4
+            ? 1.9
+            : constraints.maxWidth < 500
+            ? 1.3
+            : 2.4;
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
           children: [
             for (final item in values)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(15),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        item.$1,
-                        style: Theme.of(context).textTheme.labelLarge,
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        item.$2,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      Text(
-                        item.$3,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
+              SizedBox(
+                width: width,
+                height: width / aspectRatio,
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(15),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          item.$1,
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          item.$2,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                        Text(
+                          item.$3,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -1859,6 +1919,16 @@ class _DashboardViewState extends State<DashboardView> {
     BuildContext context,
     List<Map<String, dynamic>> accounts,
   ) {
+    final research = widget.controller.status['research'] as Map?;
+    final currentGeneration = research?['cycles'] as int? ?? 0;
+    final nextGeneration = currentGeneration + 1;
+    final progress = _SimulationActivity._fraction(research?['progress']);
+    final activity = switch (research?['phase']) {
+      'downloading' => 'Loading candles for generation $nextGeneration',
+      'tuning' => 'Tuning generation $nextGeneration',
+      'replaying' => 'Replaying generation $nextGeneration',
+      _ => 'Preparing generation $nextGeneration',
+    };
     final metrics = accounts.map(_metrics).toList();
     metrics.sort((a, b) {
       final comparison = (a[sortColumn] as num).compareTo(b[sortColumn] as num);
@@ -1886,6 +1956,20 @@ class _DashboardViewState extends State<DashboardView> {
               'Strategy metrics',
               style: Theme.of(context).textTheme.titleMedium,
             ),
+            if (widget.controller.isResearchPreview &&
+                widget.controller.backendConnected &&
+                (research?['running'] == true || research?['stopping'] == true))
+              Text(
+                [
+                  if (currentGeneration > 0)
+                    'Showing generation $currentGeneration',
+                  if (research?['stopping'] == true)
+                    'Stopping training'
+                  else
+                    '$activity${progress == null ? '' : ' (${(progress * 100).floor()}%)'}',
+                ].join(' · '),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             const SizedBox(height: 12),
             LayoutBuilder(
               builder: (context, constraints) => SingleChildScrollView(
@@ -1930,8 +2014,6 @@ class _DashboardViewState extends State<DashboardView> {
                           rows: [
                             for (final metric in [metrics[row]])
                               DataRow(
-                                onSelectChanged: (_) =>
-                                    _toggleMetric('${metric[0]}'),
                                 cells: [
                                   DataCell(
                                     Row(
@@ -3010,7 +3092,12 @@ class _RunSetupViewState extends State<RunSetupView> {
   final _mutationSize = TextEditingController(text: '35');
   final _mutationProbability = TextEditingController(text: '20');
   final _candidateCount = TextEditingController(text: '12');
+  final _elitePercent = TextEditingController(text: '15');
+  final _parentPercent = TextEditingController(text: '50');
+  final _crossoverPercent = TextEditingController(text: '80');
+  final _minimumMutation = TextEditingController(text: '.5');
   bool _resumeTraining = true;
+  bool _continuous = false;
   int? get _generations => int.tryParse(_generationCount.text.trim());
 
   EvolutionSettings _evolutionSettings() => EvolutionSettings.fromJson({
@@ -3018,6 +3105,13 @@ class _RunSetupViewState extends State<RunSetupView> {
     'additionalMutationProbability':
         (double.tryParse(_mutationProbability.text) ?? double.nan) / 100,
     'candidatesPerGeneration': int.tryParse(_candidateCount.text) ?? 0,
+    'eliteFraction': (double.tryParse(_elitePercent.text) ?? double.nan) / 100,
+    'parentFraction':
+        (double.tryParse(_parentPercent.text) ?? double.nan) / 100,
+    'crossoverProbability':
+        (double.tryParse(_crossoverPercent.text) ?? double.nan) / 100,
+    'minimumMutationAmount':
+        (double.tryParse(_minimumMutation.text) ?? double.nan) / 100,
   });
   String? _loadedRunId;
   bool _configurationLoaded = false;
@@ -3025,8 +3119,10 @@ class _RunSetupViewState extends State<RunSetupView> {
   TimeOfDay? _historicalStartTime = const TimeOfDay(hour: 7, minute: 30);
   TimeOfDay? _historicalEndTime = const TimeOfDay(hour: 14, minute: 0);
   String? _error;
+  String? _candleDataMessage;
 
   bool get _hasRunData =>
+      !widget.controller.workspaceMode &&
       widget.controller.supportsRuns &&
       (widget.controller.status['configurationLocked'] == true ||
           _accounts(widget.controller.snapshot).isNotEmpty);
@@ -3060,9 +3156,12 @@ class _RunSetupViewState extends State<RunSetupView> {
   @override
   void didUpdateWidget(covariant RunSetupView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.controller.isResearchPreview) return;
+    if (widget.controller.isResearchPreview &&
+        !widget.controller.workspaceMode) {
+      return;
+    }
     final status = widget.controller.status;
-    if (_loadedRunId != status['runId']?.toString() ||
+    if (_loadedRunId != widget.controller.setupIdentity ||
         (!_configurationLoaded &&
             (status['configuration'] is Map ||
                 status['startingCash'] is num))) {
@@ -3078,6 +3177,8 @@ class _RunSetupViewState extends State<RunSetupView> {
         status['configuration'] as Map<String, dynamic>? ??
         status;
     _resumeTraining = session != null;
+    _continuous =
+        (session?['continuous'] ?? configuration['continuousResearch']) == true;
     _generationCount.text =
         '${session?['evolutionLimit'] ?? configuration['trainingGenerations'] ?? 2}';
     final evolution = EvolutionSettings.fromJson(
@@ -3088,6 +3189,10 @@ class _RunSetupViewState extends State<RunSetupView> {
     _mutationProbability.text =
         '${evolution.additionalMutationProbability * 100}';
     _candidateCount.text = '${evolution.candidatesPerGeneration}';
+    _elitePercent.text = '${evolution.eliteFraction * 100}';
+    _parentPercent.text = '${evolution.parentFraction * 100}';
+    _crossoverPercent.text = '${evolution.crossoverProbability * 100}';
+    _minimumMutation.text = '${evolution.minimumMutationAmount * 100}';
     final savedRange = session ?? status['historicalRange'] as Map?;
     if (savedRange?['start'] case final String start) {
       final from = MountainTime.at(DateTime.parse(start));
@@ -3118,7 +3223,7 @@ class _RunSetupViewState extends State<RunSetupView> {
         configuration['startingCash'] is num ||
         configuration['risk'] is Map ||
         configuration['strategies'] is List;
-    _loadedRunId = status['runId']?.toString();
+    _loadedRunId = widget.controller.setupIdentity;
     if (configuration['watchlist'] is List) {
       _watchlist.text = (configuration['watchlist'] as List).join(', ');
     }
@@ -3199,6 +3304,10 @@ class _RunSetupViewState extends State<RunSetupView> {
     _mutationSize.dispose();
     _mutationProbability.dispose();
     _candidateCount.dispose();
+    _elitePercent.dispose();
+    _parentPercent.dispose();
+    _crossoverPercent.dispose();
+    _minimumMutation.dispose();
     _watchlist.dispose();
     _cash.dispose();
     for (final value in _parameterValues.values) {
@@ -3231,449 +3340,505 @@ class _RunSetupViewState extends State<RunSetupView> {
     final historicalStatus =
         widget.controller.status['runMode'] == 'historical';
     final range = _historicalRange;
+    final cache = widget.controller.status['historyCache'] as Map?;
+    final historyAvailable =
+        authorized || (cache?['storedDays'] as num? ?? 0) > 0;
     final canStart = _historical
-        ? authorized && range != null && research != null && validGenerations
+        ? historyAvailable &&
+              range != null &&
+              research != null &&
+              (_continuous || validGenerations)
         : feedLive;
-    return ListView(
-      shrinkWrap: widget.embedded,
-      physics: widget.embedded ? const NeverScrollableScrollPhysics() : null,
-      padding: const EdgeInsets.all(12),
-      children: [
-        Text('Run setup', style: Theme.of(context).textTheme.headlineSmall),
+    final children = <Widget>[
+      Text('Run setup', style: Theme.of(context).textTheme.headlineSmall),
+      if (!widget.controller.workspaceMode)
         _RunManager(
           controller: widget.controller,
           configuration: _configuration,
         ),
-        const SizedBox(height: 5),
-        Text(
-          _historical
-              ? 'Historical replays Schwab 1-minute bars for the chosen dates '
-                    'as fast as possible. Strategies see each minute only after '
-                    'it ends, and orders fill at the next minute\'s open, so '
-                    'nothing looks ahead.'
-              : 'Live uses Schwab stream events as they arrive.',
-        ),
-        const SizedBox(height: 12),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: OutlinedButton.icon(
-            onPressed: _busy || running || !widget.controller.backendConnected
-                ? null
-                : _confirmReset,
-            icon: const Icon(Icons.delete_outline),
-            label: const Text('Clear run data'),
-          ),
-        ),
-        if (running) const Text('Stop the run before clearing its data.'),
-        const SizedBox(height: 12),
-        SegmentedButton<bool>(
-          segments: const [
-            ButtonSegment(
-              value: false,
-              icon: Icon(Icons.sensors),
-              label: Text('Live'),
-            ),
-            ButtonSegment(
-              value: true,
-              icon: Icon(Icons.history),
-              label: Text('Historical'),
-            ),
-          ],
-          selected: {_historical},
-          onSelectionChanged: running
+      const SizedBox(height: 5),
+      Text(
+        _historical
+            ? 'Historical replays Schwab 1-minute bars for the chosen dates '
+                  'as fast as possible. Strategies see each minute only after '
+                  'it ends, and orders fill at the next minute\'s open, so '
+                  'nothing looks ahead.'
+            : 'Live uses Schwab stream events as they arrive.',
+      ),
+      const SizedBox(height: 12),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: OutlinedButton.icon(
+          onPressed: _busy || running || !widget.controller.backendConnected
               ? null
-              : (value) => setState(() => _historical = value.first),
+              : _confirmReset,
+          icon: const Icon(Icons.delete_outline),
+          label: const Text('Clear run data'),
         ),
-        if (_historical) ...[
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              OutlinedButton.icon(
-                onPressed: running ? null : _pickHistoricalRange,
-                icon: const Icon(Icons.calendar_month),
-                label: Text(
-                  range == null
-                      ? 'Choose dates'
-                      : '${MaterialLocalizations.of(context).formatMediumDate(range.start)}'
-                            ' – '
-                            '${MaterialLocalizations.of(context).formatMediumDate(range.end)}',
-                ),
-              ),
-              for (final isStart in [true, false])
-                InputChip(
-                  avatar: const Icon(Icons.schedule, size: 16),
-                  label: Text(
-                    '${isStart ? 'Start' : 'End'} '
-                    '${_formatMountain(isStart ? _historicalStartTime : _historicalEndTime, isStart)}',
-                  ),
-                  isEnabled: !running,
-                  onPressed: () => _pickHistoricalTime(isStart),
-                  onDeleted:
-                      (isStart ? _historicalStartTime : _historicalEndTime) ==
-                          null
-                      ? null
-                      : () => setState(() {
-                          if (isStart) {
-                            _historicalStartTime = null;
-                          } else {
-                            _historicalEndTime = null;
-                          }
-                        }),
-                ),
-            ],
+      ),
+      if (running) const Text('Stop the run before clearing its data.'),
+      const SizedBox(height: 12),
+      SegmentedButton<bool>(
+        segments: const [
+          ButtonSegment(
+            value: false,
+            icon: Icon(Icons.sensors),
+            label: Text('Live'),
           ),
-          const SizedBox(height: 4),
-          const Text(
-            'Times are Mountain Time: the replay starts at the start '
-            'time on the first date and stops before the end time on the last date. '
-            'Schwab keeps about the last month of 1-minute history.',
+          ButtonSegment(
+            value: true,
+            icon: Icon(Icons.history),
+            label: Text('Historical'),
           ),
-          if (widget.controller.backendConnected &&
-              !widget.controller.supportsMountainHistoricalReplay)
-            const Text(
-              'The backend must be updated before starting a Mountain-time '
-              'replay. Stop any running simulations before restarting it.',
-            ),
         ],
-        if (_error != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Text(
-              _error!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
+        selected: {_historical},
+        onSelectionChanged: running
+            ? null
+            : (value) => setState(() => _historical = value.first),
+      ),
+      if (_historical) ...[
+        if (cache != null) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: _busy || active || range == null || !historyAvailable
+                  ? null
+                  : _downloadCandleData,
+              icon: const Icon(Icons.download_outlined),
+              label: const Text('Download / reuse candle data'),
             ),
           ),
-        const SizedBox(height: 10),
+          Text(
+            '${cache['storedDays'] ?? 0} saved symbol-days of 1m candles. Completed days are reused across simulations; only missing days are downloaded.',
+          ),
+          if (_candleDataMessage != null) Text(_candleDataMessage!),
+        ],
+        const SizedBox(height: 12),
         Wrap(
-          spacing: 10,
-          runSpacing: 10,
+          spacing: 8,
+          runSpacing: 4,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            if (_historical)
-              SizedBox(
-                width: 160,
-                child: TextFormField(
-                  key: const ValueKey('setup-research-generations'),
-                  controller: _generationCount,
-                  enabled: !_busy && !active,
-                  keyboardType: TextInputType.number,
-                  decoration: InputDecoration(
-                    labelText: 'Generations',
-                    errorText: validGenerations
-                        ? null
-                        : 'Enter 1?$maxTuningGenerations',
-                  ),
-                  onChanged: (_) => setState(() {}),
+            OutlinedButton.icon(
+              onPressed: running ? null : _pickHistoricalRange,
+              icon: const Icon(Icons.calendar_month),
+              label: Text(
+                range == null
+                    ? 'Choose dates'
+                    : '${MaterialLocalizations.of(context).formatMediumDate(range.start)}'
+                          ' – '
+                          '${MaterialLocalizations.of(context).formatMediumDate(range.end)}',
+              ),
+            ),
+            for (final isStart in [true, false])
+              InputChip(
+                avatar: const Icon(Icons.schedule, size: 16),
+                label: Text(
+                  '${isStart ? 'Start' : 'End'} '
+                  '${_formatMountain(isStart ? _historicalStartTime : _historicalEndTime, isStart)}',
+                ),
+                isEnabled: !running,
+                onPressed: () => _pickHistoricalTime(isStart),
+                onDeleted:
+                    (isStart ? _historicalStartTime : _historicalEndTime) ==
+                        null
+                    ? null
+                    : () => setState(() {
+                        if (isStart) {
+                          _historicalStartTime = null;
+                        } else {
+                          _historicalEndTime = null;
+                        }
+                      }),
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Times are Mountain Time: the replay starts at the start '
+          'time on the first date and stops before the end time on the last date. '
+          'Schwab keeps about the last month of 1-minute history.',
+        ),
+        if (widget.controller.backendConnected &&
+            !widget.controller.supportsMountainHistoricalReplay)
+          const Text(
+            'The backend must be updated before starting a Mountain-time '
+            'replay. Stop any running simulations before restarting it.',
+          ),
+      ],
+      if (_error != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: CopyableError(
+            _error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ),
+      const SizedBox(height: 10),
+      Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          if (_historical && !_continuous)
+            SizedBox(
+              width: 160,
+              child: TextFormField(
+                key: const ValueKey('setup-research-generations'),
+                controller: _generationCount,
+                enabled: !_busy && !active,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: 'Generations',
+                  errorText: validGenerations
+                      ? null
+                      : 'Enter 1?$maxTuningGenerations',
+                ),
+                onChanged: (_) => setState(() {}),
+              ),
+            ),
+          if (_historical)
+            SizedBox(
+              width: 180,
+              child: TextField(
+                key: const ValueKey('population-size'),
+                controller: _candidateCount,
+                enabled: !_busy && !active,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Population size',
+                  helperText: 'Variants per strategy · 2–200',
                 ),
               ),
-            FilledButton.icon(
-              onPressed:
-                  _busy ||
-                      research?['stopping'] == true ||
-                      (!active && !canStart)
-                  ? null
-                  : researching
-                  ? () => _setResearch(false)
-                  : running
-                  ? _stop
-                  : _historical
-                  ? () => _setResearch(true)
-                  : _start,
-              icon: Icon(active ? Icons.stop : Icons.play_arrow),
-              label: Text(active ? 'Stop' : 'Start'),
             ),
-            OutlinedButton.icon(
-              onPressed: _busy || active || _hasRunData ? null : _save,
-              icon: const Icon(Icons.save_outlined),
-              label: const Text('Save configuration'),
+          FilledButton.icon(
+            onPressed:
+                _busy || research?['stopping'] == true || (!active && !canStart)
+                ? null
+                : researching
+                ? () => _setResearch(false)
+                : running
+                ? _stop
+                : _historical
+                ? () => _setResearch(true)
+                : _start,
+            icon: Icon(active ? Icons.stop : Icons.play_arrow),
+            label: Text(active ? 'Stop' : 'Start'),
+          ),
+          OutlinedButton.icon(
+            onPressed: _busy || active || _hasRunData ? null : _save,
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Save configuration'),
+          ),
+        ],
+      ),
+      if (_historical) ...[
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Continuous sampling'),
+          subtitle: const Text(
+            'Until stopped, each generation samples one to five trading days '
+            'and a window of at least three hours per day. Uses saved 1-minute '
+            'candles and downloads missing days before training.',
+          ),
+          value: _continuous,
+          onChanged: active
+              ? null
+              : (value) => setState(() => _continuous = value),
+        ),
+        if (session != null)
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(
+              'Continue saved training ($completed generations completed)',
+            ),
+            subtitle: Text(
+              _continuous
+                  ? 'Reuse the saved dates and population.'
+                  : 'Set Generations to the desired total. Saved dates and data will be reused.',
+            ),
+            value: _resumeTraining,
+            onChanged: active
+                ? null
+                : (value) => setState(() => _resumeTraining = value!),
+          ),
+        ExpansionTile(
+          title: const Text('Evolution settings'),
+          maintainState: true,
+          children: [
+            for (final (label, field) in [
+              ('Mutation size (%)', _mutationSize),
+              ('Extra-variable mutation (%)', _mutationProbability),
+              ('Minimum mutation size (%)', _minimumMutation),
+              ('Elites carried forward (%)', _elitePercent),
+              ('Parent selection pool (%)', _parentPercent),
+              ('Crossover probability (%)', _crossoverPercent),
+            ])
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: TextField(
+                  controller: field,
+                  enabled: !active,
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(labelText: label),
+                ),
+              ),
+            const Text(
+              'Each generation evaluates the population on the chosen dates. Strong parents breed children; elites stay unchanged. Mutation shrinks as profit and win rate improve together. The champion changes only when neither metric gets worse. These are training results on this historical sample.',
             ),
           ],
         ),
-        if (_historical) ...[
-          if (session != null)
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(
-                'Continue saved training ($completed generations completed)',
-              ),
-              subtitle: const Text(
-                'Set Generations to the desired total. Saved dates and data will be reused.',
-              ),
-              value: _resumeTraining,
-              onChanged: active
-                  ? null
-                  : (value) => setState(() => _resumeTraining = value!),
-            ),
-          ExpansionTile(
-            title: const Text('Evolution settings'),
-            maintainState: true,
+      ],
+      const SizedBox(height: 10),
+      Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              for (final (label, field) in [
-                ('Mutation size (%)', _mutationSize),
-                ('Extra-variable mutation (%)', _mutationProbability),
-                ('Mutation candidates per generation', _candidateCount),
-              ])
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: TextField(
-                    controller: field,
-                    enabled: !active,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(labelText: label),
+              Text(
+                _historical ? 'Run configuration' : 'Live run configuration',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _watchlist,
+                decoration: const InputDecoration(
+                  labelText: 'Watchlist',
+                  helperText:
+                      'Comma-separated tickers · defaults: SOXL, OKLO, SMR',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _cash,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: 'Starting cash per portfolio (USD)',
+                  helperText:
+                      'Every strategy and benchmark gets its own separate '
+                      'portfolio that starts with this amount.',
+                ),
+              ),
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Portfolio risk and execution',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                children: [
+                  for (final entry in const {
+                    'positionSizePercent': 'Position size cap (%)',
+                    'maxExposurePercent': 'Max exposure (%)',
+                    'dailyLossLimitPercent': 'Daily loss limit (%)',
+                    'riskPerTradePercent': 'Risk per trade (%)',
+                    'defaultStopPercent': 'Fallback stop (%)',
+                    'defaultTargetPercent': 'Fallback target (%)',
+                    'spreadBps': 'Spread (bps)',
+                    'slippageBps': 'Slippage (bps)',
+                    'feePerShare': 'Fee per share (USD)',
+                  }.entries)
+                    SizedBox(
+                      width: 190,
+                      child: TextField(
+                        controller: _riskFields[entry.key],
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(labelText: entry.value),
+                      ),
+                    ),
+                ],
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _enableShortSelling,
+                title: const Text('Enable short selling'),
+                subtitle: const Text(
+                  'Simulator collateral model: short proceeds are reserved; '
+                  'short exposure requires available collateral. No broker orders.',
+                ),
+                onChanged: running
+                    ? null
+                    : (value) =>
+                          setState(() => _enableShortSelling = value ?? false),
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _sessionClosePolicyEnabled,
+                title: const Text('Market close rule'),
+                subtitle: const Text(
+                  '10 minutes before close: stop new entries and close a strategy\'s positions if they are profitable after costs. '
+                  '1 minute before close: close all remaining positions.',
+                ),
+                onChanged: running
+                    ? null
+                    : (value) => setState(
+                        () => _sessionClosePolicyEnabled = value ?? false,
+                      ),
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _allowOvernight,
+                title: const Text('Allow positions to be held overnight'),
+                onChanged: (value) =>
+                    setState(() => _allowOvernight = value ?? false),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 12,
+                children: [
+                  const Chip(
+                    label: Text('Chart intervals: 1m · 5m · 15m · 30m'),
+                  ),
+                  const Chip(label: Text('Orders: simulator only')),
+                  Chip(
+                    label: Text(
+                      _historical
+                          ? 'Fills: next minute open (no look-ahead)'
+                          : 'Fills: next eligible quote',
+                    ),
+                  ),
+                ],
+              ),
+              const Divider(height: 28),
+              Text('Benchmarks', style: Theme.of(context).textTheme.titleSmall),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Buy & Hold'),
+                value: _buyAndHold,
+                onChanged: active
+                    ? null
+                    : (value) => setState(() => _buyAndHold = value!),
+              ),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Equal Weight'),
+                value: _equalWeight,
+                onChanged: active
+                    ? null
+                    : (value) => setState(() => _equalWeight = value!),
+              ),
+              const Divider(height: 28),
+              Text(
+                'Strategy instances',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const Text(
+                'Add as many independent portfolios as you want; there is no '
+                'fixed instance limit. Practical capacity depends on your '
+                'computer.',
+              ),
+              if (widget.controller.status['algorithmImportsSupported'] ==
+                  true) ...[
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: widget.controller.importingAlgorithm
+                        ? null
+                        : _importAlgorithm,
+                    icon: const Icon(Icons.file_open_outlined),
+                    label: const Text('Add algorithm from file'),
                   ),
                 ),
-              const Text(
-                'Mutation size controls the step. Extra-variable mutation controls how often other values change. Weak candidates receive larger changes.',
+                const Text(
+                  'Choose a JSON rules file or Dart algorithm. Imported algorithms are saved and available in every simulation. Dart files require the Dart SDK on the backend computer.',
+                ),
+                if (widget.controller.importingAlgorithm) ...[
+                  const SizedBox(height: 8),
+                  const LinearProgressIndicator(),
+                  Text(widget.controller.algorithmImportStatus),
+                ],
+                const SizedBox(height: 10),
+              ],
+              for (final instance in _instances)
+                _strategyTile(
+                  StrategyRegistry.byId(_instanceStrategy[instance]!),
+                  instance,
+                ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: PopupMenuButton<String>(
+                  tooltip: 'Add another strategy instance',
+                  onSelected: (strategyId) {
+                    setState(() {
+                      _addInstance(StrategyRegistry.byId(strategyId));
+                    });
+                  },
+                  itemBuilder: (context) => [
+                    for (final strategy in StrategyRegistry.all)
+                      PopupMenuItem(
+                        value: strategy.id,
+                        child: Text(strategy.name),
+                      ),
+                  ],
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 10),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.add_circle_outline),
+                        SizedBox(width: 8),
+                        Text('Add strategy instance'),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              if (_hasRunData)
+                const Text(
+                  'This run’s configuration is pinned to its saved data. '
+                  'Create a new simulation to use different settings.',
+                ),
+              if (running && historicalStatus)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: LinearProgressIndicator(
+                    value: (widget.controller.status['replayProgress'] as num?)
+                        ?.toDouble(),
+                  ),
+                ),
+              Text(
+                running || historicalStatus
+                    ? widget.controller.status['runStatus']?.toString() ??
+                          'Running'
+                    : _historical
+                    ? historyAvailable
+                          ? range == null
+                                ? 'Choose a date range to replay.'
+                                : 'Ready to replay the chosen dates.'
+                          : 'Connect Schwab in Settings before replaying.'
+                    : feedLive
+                    ? 'Schwab stream is live. Configure and start when ready.'
+                    : 'Connect Schwab in Settings before starting.',
               ),
             ],
           ),
-        ],
-        const SizedBox(height: 10),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _historical ? 'Run configuration' : 'Live run configuration',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _watchlist,
-                  decoration: const InputDecoration(
-                    labelText: 'Watchlist',
-                    helperText:
-                        'Comma-separated tickers · defaults: SOXL, OKLO, SMR',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _cash,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: 'Starting cash per portfolio (USD)',
-                    helperText:
-                        'Every strategy and benchmark gets its own separate '
-                        'portfolio that starts with this amount.',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    'Portfolio risk and execution',
-                    style: Theme.of(context).textTheme.titleSmall,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 10,
-                  children: [
-                    for (final entry in const {
-                      'positionSizePercent': 'Position size cap (%)',
-                      'maxExposurePercent': 'Max exposure (%)',
-                      'dailyLossLimitPercent': 'Daily loss limit (%)',
-                      'riskPerTradePercent': 'Risk per trade (%)',
-                      'defaultStopPercent': 'Fallback stop (%)',
-                      'defaultTargetPercent': 'Fallback target (%)',
-                      'spreadBps': 'Spread (bps)',
-                      'slippageBps': 'Slippage (bps)',
-                      'feePerShare': 'Fee per share (USD)',
-                    }.entries)
-                      SizedBox(
-                        width: 190,
-                        child: TextField(
-                          controller: _riskFields[entry.key],
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          decoration: InputDecoration(labelText: entry.value),
-                        ),
-                      ),
-                  ],
-                ),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: _enableShortSelling,
-                  title: const Text('Enable short selling'),
-                  subtitle: const Text(
-                    'Simulator collateral model: short proceeds are reserved; '
-                    'short exposure requires available collateral. No broker orders.',
-                  ),
-                  onChanged: running
-                      ? null
-                      : (value) => setState(
-                          () => _enableShortSelling = value ?? false,
-                        ),
-                ),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: _sessionClosePolicyEnabled,
-                  title: const Text('Market close rule'),
-                  subtitle: const Text(
-                    '10 minutes before close: stop new entries and close a strategy\'s positions if they are profitable after costs. '
-                    '1 minute before close: close all remaining positions.',
-                  ),
-                  onChanged: running
-                      ? null
-                      : (value) => setState(
-                          () => _sessionClosePolicyEnabled = value ?? false,
-                        ),
-                ),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: _allowOvernight,
-                  title: const Text('Allow positions to be held overnight'),
-                  onChanged: (value) =>
-                      setState(() => _allowOvernight = value ?? false),
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 12,
-                  children: [
-                    const Chip(
-                      label: Text('Chart intervals: 1m · 5m · 15m · 30m'),
-                    ),
-                    const Chip(label: Text('Orders: simulator only')),
-                    Chip(
-                      label: Text(
-                        _historical
-                            ? 'Fills: next minute open (no look-ahead)'
-                            : 'Fills: next eligible quote',
-                      ),
-                    ),
-                  ],
-                ),
-                const Divider(height: 28),
-                Text(
-                  'Benchmarks',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Buy & Hold'),
-                  value: _buyAndHold,
-                  onChanged: active
-                      ? null
-                      : (value) => setState(() => _buyAndHold = value!),
-                ),
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Equal Weight'),
-                  value: _equalWeight,
-                  onChanged: active
-                      ? null
-                      : (value) => setState(() => _equalWeight = value!),
-                ),
-                const Divider(height: 28),
-                Text(
-                  'Strategy instances',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-                const Text(
-                  'Add as many independent portfolios as you want; there is no '
-                  'fixed instance limit. Practical capacity depends on your '
-                  'computer.',
-                ),
-                if (widget.controller.status['algorithmImportsSupported'] ==
-                    true) ...[
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: OutlinedButton.icon(
-                      onPressed: widget.controller.importingAlgorithm
-                          ? null
-                          : _importAlgorithm,
-                      icon: const Icon(Icons.file_open_outlined),
-                      label: const Text('Add algorithm from file'),
-                    ),
-                  ),
-                  const Text(
-                    'Choose a JSON rules file or Dart algorithm. Imported algorithms are saved and available in every simulation. Dart files require the Dart SDK on the backend computer.',
-                  ),
-                  if (widget.controller.importingAlgorithm) ...[
-                    const SizedBox(height: 8),
-                    const LinearProgressIndicator(),
-                    Text(widget.controller.algorithmImportStatus),
-                  ],
-                  const SizedBox(height: 10),
-                ],
-                for (final instance in _instances)
-                  _strategyTile(
-                    StrategyRegistry.byId(_instanceStrategy[instance]!),
-                    instance,
-                  ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: PopupMenuButton<String>(
-                    tooltip: 'Add another strategy instance',
-                    onSelected: (strategyId) {
-                      setState(() {
-                        _addInstance(StrategyRegistry.byId(strategyId));
-                      });
-                    },
-                    itemBuilder: (context) => [
-                      for (final strategy in StrategyRegistry.all)
-                        PopupMenuItem(
-                          value: strategy.id,
-                          child: Text(strategy.name),
-                        ),
-                    ],
-                    child: const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 10),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.add_circle_outline),
-                          SizedBox(width: 8),
-                          Text('Add strategy instance'),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                if (_hasRunData)
-                  const Text(
-                    'This run’s configuration is pinned to its saved data. '
-                    'Create a new simulation to use different settings.',
-                  ),
-                if (running && historicalStatus)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: LinearProgressIndicator(
-                      value:
-                          (widget.controller.status['replayProgress'] as num?)
-                              ?.toDouble(),
-                    ),
-                  ),
-                Text(
-                  running || historicalStatus
-                      ? widget.controller.status['runStatus']?.toString() ??
-                            'Running'
-                      : _historical
-                      ? authorized
-                            ? range == null
-                                  ? 'Choose a date range to replay.'
-                                  : 'Ready to replay the chosen dates.'
-                            : 'Connect Schwab in Settings before replaying.'
-                      : feedLive
-                      ? 'Schwab stream is live. Configure and start when ready.'
-                      : 'Connect Schwab in Settings before starting.',
-                ),
-              ],
-            ),
-          ),
         ),
-      ],
-    );
+      ),
+    ];
+    const padding = EdgeInsets.all(12);
+    // The dashboard already scrolls. A nested scrollable can receive selection
+    // events even when this kept-alive panel is outside the painted viewport.
+    if (widget.embedded) {
+      return Padding(
+        padding: padding,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: children,
+        ),
+      );
+    }
+    return ListView(padding: padding, children: children);
   }
 
   Future<void> _importAlgorithm() async {
@@ -3684,7 +3849,10 @@ class _RunSetupViewState extends State<RunSetupView> {
           widget.controller.status['running'] == true ||
           (widget.controller.status['research'] as Map?)?['running'] == true;
       final canAdd =
-          !busy && !_hasRunData && !widget.controller.isResearchPreview;
+          !busy &&
+          !_hasRunData &&
+          (!widget.controller.isResearchPreview ||
+              widget.controller.workspaceMode);
       if (canAdd) setState(() => _addInstance(strategy));
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -3697,7 +3865,7 @@ class _RunSetupViewState extends State<RunSetupView> {
       );
     } catch (error) {
       if (!mounted) return;
-      await showDialog<void>(
+      await showSelectableDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('Algorithm could not be imported'),
@@ -3708,6 +3876,11 @@ class _RunSetupViewState extends State<RunSetupView> {
             ),
           ),
           actions: [
+            TextButton.icon(
+              onPressed: () => copyAppText(context, error.toString()),
+              icon: const Icon(Icons.copy_outlined),
+              label: const Text('Copy error'),
+            ),
             TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('Close'),
@@ -3918,7 +4091,14 @@ class _RunSetupViewState extends State<RunSetupView> {
       'watchlist': symbols,
       'startingCash': cash,
       'evolution': _evolutionSettings().toJson(),
-      'trainingGenerations': _generations ?? 2,
+      'trainingGenerations':
+          _continuous &&
+              (_generations == null ||
+                  _generations! < 1 ||
+                  _generations! > maxTuningGenerations)
+          ? 2
+          : _generations ?? 2,
+      'continuousResearch': _continuous,
       'mode': _historical ? 'historical' : 'live',
       if (_historicalRange case final range?)
         'historicalSetup': widget.controller._historicalRequest(
@@ -3970,10 +4150,14 @@ class _RunSetupViewState extends State<RunSetupView> {
     try {
       await widget.controller.setAutoResearch(
         enabled,
+        continuous: _continuous,
         configuration: enabled ? _configuration() : null,
         generations: _generations ?? 2,
         evolution: _evolutionSettings(),
-        resume: enabled && _resumeTraining,
+        resume:
+            enabled &&
+            _resumeTraining &&
+            widget.controller.status['trainingSession'] != null,
         historicalRange: enabled && _historical ? _historicalRange : null,
         startTime: _historicalStartTime,
         endTime: _historicalEndTime,
@@ -3984,6 +4168,49 @@ class _RunSetupViewState extends State<RunSetupView> {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _downloadCandleData() async {
+    final range = _historicalRange;
+    if (range == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _candleDataMessage =
+          'Loading saved candles and downloading missing days…';
+    });
+    try {
+      final result = await widget.controller.downloadCandleData(
+        _watchlist.text
+            .split(',')
+            .map((s) => s.trim().toUpperCase())
+            .where((s) => s.isNotEmpty)
+            .toSet()
+            .toList(),
+        range,
+        startTime: _historicalStartTime,
+        endTime: _historicalEndTime,
+      );
+      if (mounted) {
+        setState(() {
+          _candleDataMessage =
+              '${result['bars']} one-minute candles available. ${result['activity']}';
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error.toString();
+          _candleDataMessage = null;
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+        });
+      }
     }
   }
 
@@ -4046,7 +4273,7 @@ class _RunSetupViewState extends State<RunSetupView> {
         _error = null;
       });
       if (_hasRunData && widget.controller.supportsRuns) {
-        final create = await showDialog<bool>(
+        final create = await showSelectableDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Create a new simulation?'),
@@ -4095,7 +4322,7 @@ class _RunSetupViewState extends State<RunSetupView> {
   }
 
   Future<void> _confirmReset() async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showSelectableDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Clear run data?'),
@@ -4134,7 +4361,7 @@ class _RunSetupViewState extends State<RunSetupView> {
         setState(() => _error = message);
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text(message)));
+        ).showSnackBar(copyableErrorSnackBar(context, message));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -4241,7 +4468,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
               if (widget.controller.backendError.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
-                  child: Text(
+                  child: CopyableError(
                     widget.controller.backendError,
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
@@ -4347,17 +4574,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
               if (_schwabMessage != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 10),
-                  child: Text(
-                    _schwabMessage!,
-                    style: _schwabMessageIsError
-                        ? TextStyle(color: Theme.of(context).colorScheme.error)
-                        : null,
-                  ),
+                  child: _schwabMessageIsError
+                      ? CopyableError(_schwabMessage!)
+                      : Text(_schwabMessage!),
                 )
               else if ((status['lastError'] as String?)?.isNotEmpty == true)
                 Padding(
                   padding: const EdgeInsets.only(top: 10),
-                  child: Text(
+                  child: CopyableError(
                     'Last backend error: ${status['lastError']}',
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
@@ -5139,108 +5363,173 @@ class _CandlePainter extends CustomPainter {
   final Color grid;
   final Color text;
 
-  /// Index of the first bar whose close time is after [time], i.e. the bar
-  /// during which the event happened.
-  int _barIndexFor(List<Map<String, dynamic>> bars, DateTime time) =>
-      bars.indexWhere(
-        (bar) =>
-            DateTime.tryParse(bar['time'].toString())?.isAfter(time) ?? false,
-      );
+  late final List<Map<String, dynamic>> _bars = rows
+      .cast<Map<String, dynamic>>()
+      .where(
+        (bar) => const [
+          'open',
+          'high',
+          'low',
+          'close',
+        ].every((key) => bar[key] is num && (bar[key] as num).isFinite),
+      )
+      .toList();
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (rows.isEmpty) return;
-    final bars = rows.cast<Map<String, dynamic>>();
-    final highs = bars.map((bar) => (bar['high'] as num).toDouble()).toList();
-    final lows = bars.map((bar) => (bar['low'] as num).toDouble()).toList();
-    final maxPrice = highs.reduce((a, b) => a > b ? a : b);
-    final minPrice = lows.reduce((a, b) => a < b ? a : b);
-    final span = (maxPrice - minPrice).abs() < .000001
-        ? 1
-        : maxPrice - minPrice;
-    double y(double value) => (maxPrice - value) / span * size.height;
-    for (var i = 0; i <= 4; i++) {
-      final gridY = size.height * i / 4;
-      canvas.drawLine(
-        Offset(0, gridY),
-        Offset(size.width, gridY),
-        Paint()..color = grid.withValues(alpha: .4),
-      );
-    }
-    final slot = size.width / bars.length;
-    final candleWidth = slot * .55;
-    for (var index = 0; index < bars.length; index++) {
-      final bar = bars[index];
-      final x = (index + .5) * slot;
-      final open = (bar['open'] as num).toDouble();
-      final close = (bar['close'] as num).toDouble();
-      final positive = close >= open;
-      final paint = Paint()
-        ..color = positive ? up : down
-        ..strokeWidth = 1.2;
-      canvas.drawLine(
-        Offset(x, y((bar['high'] as num).toDouble())),
-        Offset(x, y((bar['low'] as num).toDouble())),
-        paint,
-      );
-      final top = y(positive ? close : open);
-      final bottom = y(positive ? open : close);
-      canvas.drawRect(
-        Rect.fromLTRB(
-          x - candleWidth / 2,
-          top,
-          x + candleWidth / 2,
-          bottom == top ? bottom + 1 : bottom,
-        ),
-        paint..style = PaintingStyle.fill,
-      );
-    }
-    for (final event in events) {
-      final price = (event['price'] as num?)?.toDouble();
-      final time = DateTime.tryParse(event['time']?.toString() ?? '');
-      if (price == null || time == null) continue;
-      final nearest = _barIndexFor(bars, time);
-      if (nearest < 0) continue;
-      final color = event['action'] == 'buy' ? up : down;
-      canvas.drawCircle(
-        Offset((nearest + .5) * slot, y(price)),
-        5,
-        Paint()..color = color,
-      );
-    }
+  late final List<Map<String, dynamic>> _markers = events.where((event) {
+    final price = event['price'];
+    final time = DateTime.tryParse(event['time']?.toString() ?? '');
+    return event['kind'] == 'fill' &&
+        price is num &&
+        price.isFinite &&
+        time != null &&
+        _barIndexFor(_bars, time) >= 0;
+  }).toList();
 
-    final pointer = hover;
-    if (pointer == null) return;
-    final index = (pointer.dx / slot).floor().clamp(0, bars.length - 1);
-    final x = (index + .5) * slot;
-    canvas.drawLine(
-      Offset(x, 0),
-      Offset(x, size.height),
-      Paint()..color = text.withValues(alpha: .35),
-    );
-    canvas.drawLine(
-      Offset(0, pointer.dy),
-      Offset(size.width, pointer.dy),
-      Paint()..color = text.withValues(alpha: .2),
+  ({Rect plot, double min, double max}) _layout(Size size) {
+    final prices = <double>[
+      for (final bar in _bars)
+        for (final key in ['open', 'high', 'low', 'close'])
+          (bar[key] as num).toDouble(),
+      for (final event in _markers) (event['price'] as num).toDouble(),
+    ];
+    var low = prices.reduce(math.min), high = prices.reduce(math.max);
+    final span = high - low;
+    final padding = span < .000001
+        ? math.max(high.abs() * .001, .005)
+        : span * .05;
+    low -= padding;
+    high += padding;
+    final edge = math.min(7.0, size.shortestSide / 4);
+    return (
+      plot: Rect.fromLTWH(
+        edge,
+        edge,
+        size.width - edge * 2,
+        size.height - edge * 2,
+      ),
+      min: low,
+      max: high,
     );
   }
 
+  /// Index of the first bar whose close time is after [time], i.e. the bar
+  /// during which the event happened.
+  int _barIndexFor(List<Map<String, dynamic>> bars, DateTime time) {
+    if (bars.isEmpty) return -1;
+    final first = DateTime.tryParse(bars.first['time'].toString());
+    final last = DateTime.tryParse(bars.last['time'].toString());
+    if (first == null || last == null || time.isAfter(last)) return -1;
+    final next = bars.length > 1
+        ? DateTime.tryParse(bars[1]['time'].toString())
+        : null;
+    final interval = next == null
+        ? const Duration(minutes: 1)
+        : next.difference(first);
+    if (time.isBefore(first.subtract(interval))) return -1;
+    var low = 0, high = bars.length;
+    while (low < high) {
+      final middle = (low + high) ~/ 2;
+      final close = DateTime.tryParse(bars[middle]['time'].toString());
+      if (close != null && close.isAfter(time)) {
+        high = middle;
+      } else {
+        low = middle + 1;
+      }
+    }
+    return low == bars.length ? bars.length - 1 : low;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final bars = _bars;
+    if (bars.isEmpty || size.isEmpty) return;
+    final layout = _layout(size), plot = layout.plot;
+    final span = layout.max - layout.min;
+    double y(double value) =>
+        plot.top + (layout.max - value) / span * plot.height;
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    try {
+      for (var i = 0; i <= 4; i++) {
+        final gridY = plot.top + plot.height * i / 4;
+        canvas.drawLine(
+          Offset(plot.left, gridY),
+          Offset(plot.right, gridY),
+          Paint()..color = grid.withValues(alpha: .4),
+        );
+      }
+      final slot = plot.width / bars.length;
+      final candleWidth = math.min(14.0, slot * .55);
+      for (var index = 0; index < bars.length; index++) {
+        final bar = bars[index];
+        final x = plot.left + (index + .5) * slot;
+        final open = (bar['open'] as num).toDouble();
+        final close = (bar['close'] as num).toDouble();
+        final positive = close >= open;
+        final paint = Paint()
+          ..color = positive ? up : down
+          ..strokeWidth = 1.2;
+        canvas.drawLine(
+          Offset(x, y((bar['high'] as num).toDouble())),
+          Offset(x, y((bar['low'] as num).toDouble())),
+          paint,
+        );
+        final top = y(positive ? close : open);
+        final bottom = y(positive ? open : close);
+        canvas.drawRect(
+          Rect.fromLTRB(
+            x - candleWidth / 2,
+            top,
+            x + candleWidth / 2,
+            bottom == top ? bottom + 1 : bottom,
+          ),
+          paint..style = PaintingStyle.fill,
+        );
+      }
+      for (final event in _markers) {
+        final price = (event['price'] as num?)?.toDouble();
+        final time = DateTime.tryParse(event['time']?.toString() ?? '');
+        if (price == null || time == null) continue;
+        final nearest = _barIndexFor(bars, time);
+        if (nearest < 0) continue;
+        final color = event['action'] == 'buy' ? up : down;
+        canvas.drawCircle(
+          Offset(plot.left + (nearest + .5) * slot, y(price)),
+          5,
+          Paint()..color = color,
+        );
+      }
+
+      final pointer = hover;
+      if (pointer == null) return;
+      final index = ((pointer.dx - plot.left) / slot).floor().clamp(
+        0,
+        bars.length - 1,
+      );
+      final x = plot.left + (index + .5) * slot;
+      canvas.drawLine(
+        Offset(x, plot.top),
+        Offset(x, plot.bottom),
+        Paint()..color = text.withValues(alpha: .35),
+      );
+      canvas.drawLine(
+        Offset(plot.left, pointer.dy.clamp(plot.top, plot.bottom)),
+        Offset(plot.right, pointer.dy.clamp(plot.top, plot.bottom)),
+        Paint()..color = text.withValues(alpha: .2),
+      );
+    } finally {
+      canvas.restore();
+    }
+  }
+
   List<(String, Color)> tooltipLines(Size size, Offset pointer) {
-    if (rows.isEmpty) return [];
-    final bars = rows.cast<Map<String, dynamic>>();
-    final maxPrice = bars
-        .map((bar) => (bar['high'] as num).toDouble())
-        .reduce(math.max);
-    final minPrice = bars
-        .map((bar) => (bar['low'] as num).toDouble())
-        .reduce(math.min);
-    final span = (maxPrice - minPrice).abs() < .000001
-        ? 1
-        : maxPrice - minPrice;
-    final index = (pointer.dx / (size.width / bars.length)).floor().clamp(
-      0,
-      bars.length - 1,
-    );
+    final bars = _bars;
+    if (bars.isEmpty || size.isEmpty) return [];
+    final layout = _layout(size), plot = layout.plot;
+    final span = layout.max - layout.min;
+    final index = ((pointer.dx - plot.left) / (plot.width / bars.length))
+        .floor()
+        .clamp(0, bars.length - 1);
     final bar = bars[index];
     String price(String key) => (bar[key] as num?)?.toStringAsFixed(2) ?? '?';
     final time = DateTime.tryParse(bar['time']?.toString() ?? '');
@@ -5250,10 +5539,10 @@ class _CandlePainter extends CustomPainter {
       ('Low ${price('low')}   Close ${price('close')}', text),
       ('Volume ${(bar['volume'] as num?)?.round() ?? '?'}', text),
       (
-        'Cursor price ${(maxPrice - pointer.dy / size.height * span).toStringAsFixed(2)}',
+        'Cursor price ${(layout.max - (pointer.dy.clamp(plot.top, plot.bottom) - plot.top) / plot.height * span).toStringAsFixed(2)}',
         text.withValues(alpha: .7),
       ),
-      for (final event in events.where((event) {
+      for (final event in _markers.where((event) {
         final time = DateTime.tryParse(event['time']?.toString() ?? '');
         return event['price'] is num &&
             time != null &&
@@ -5423,7 +5712,7 @@ void _showStrategyInformation(
   _StrategyInformation info,
   String portfolioLabel,
 ) {
-  showDialog<void>(
+  showSelectableDialog<void>(
     context: context,
     builder: (context) => AlertDialog(
       title: Text(info.name),
@@ -5588,11 +5877,15 @@ class _BackendNotice extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  starting
-                      ? 'Starting local backend...'
-                      : 'Local backend unavailable: $message',
-                ),
+                if (starting)
+                  const Text('Starting local backend...')
+                else
+                  CopyableError(
+                    'Local backend unavailable: $message',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onErrorContainer,
+                    ),
+                  ),
                 Wrap(
                   spacing: 8,
                   children: [

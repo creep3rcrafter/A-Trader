@@ -18,6 +18,10 @@ class EvolutionSettings {
     this.mutationAmount = .35,
     this.additionalMutationProbability = .2,
     this.candidatesPerGeneration = 12,
+    this.eliteFraction = .15,
+    this.parentFraction = .5,
+    this.crossoverProbability = .8,
+    this.minimumMutationAmount = .005,
   });
 
   factory EvolutionSettings.fromJson(Map<String, dynamic>? json) {
@@ -25,7 +29,16 @@ class EvolutionSettings {
       mutationAmount: (json?['mutationAmount'] as num?)?.toDouble() ?? .35,
       additionalMutationProbability:
           (json?['additionalMutationProbability'] as num?)?.toDouble() ?? .2,
-      candidatesPerGeneration: json?['candidatesPerGeneration'] as int? ?? 12,
+      candidatesPerGeneration:
+          (json?['populationSize'] ?? json?['candidatesPerGeneration'])
+              as int? ??
+          12,
+      eliteFraction: (json?['eliteFraction'] as num?)?.toDouble() ?? .15,
+      parentFraction: (json?['parentFraction'] as num?)?.toDouble() ?? .5,
+      crossoverProbability:
+          (json?['crossoverProbability'] as num?)?.toDouble() ?? .8,
+      minimumMutationAmount:
+          (json?['minimumMutationAmount'] as num?)?.toDouble() ?? .005,
     );
     if (!settings.mutationAmount.isFinite ||
         settings.mutationAmount < .01 ||
@@ -34,9 +47,22 @@ class EvolutionSettings {
         settings.additionalMutationProbability < 0 ||
         settings.additionalMutationProbability > 1 ||
         settings.candidatesPerGeneration < 1 ||
-        settings.candidatesPerGeneration > 200) {
+        settings.candidatesPerGeneration > 200 ||
+        !settings.eliteFraction.isFinite ||
+        settings.eliteFraction < .01 ||
+        settings.eliteFraction > .5 ||
+        !settings.parentFraction.isFinite ||
+        settings.parentFraction < .1 ||
+        settings.parentFraction > 1 ||
+        !settings.crossoverProbability.isFinite ||
+        settings.crossoverProbability < 0 ||
+        settings.crossoverProbability > 1 ||
+        !settings.minimumMutationAmount.isFinite ||
+        settings.minimumMutationAmount < 0 ||
+        settings.minimumMutationAmount > settings.mutationAmount) {
       throw ArgumentError(
-        'Choose mutation size 1–200%, mutation probability 0–100%, and 1–200 candidates.',
+        'Choose mutation size 1–200%, minimum mutation between 0 and mutation size, '
+        'probabilities 0–100%, elites 1–50%, parents 10–100%, and population 1–200.',
       );
     }
     return settings;
@@ -45,11 +71,20 @@ class EvolutionSettings {
   final double mutationAmount;
   final double additionalMutationProbability;
   final int candidatesPerGeneration;
+  int get populationSize => math.max(2, candidatesPerGeneration);
+  final double eliteFraction;
+  final double parentFraction;
+  final double crossoverProbability;
+  final double minimumMutationAmount;
 
   Map<String, Object?> toJson() => {
     'mutationAmount': mutationAmount,
     'additionalMutationProbability': additionalMutationProbability,
     'candidatesPerGeneration': candidatesPerGeneration,
+    'eliteFraction': eliteFraction,
+    'parentFraction': parentFraction,
+    'crossoverProbability': crossoverProbability,
+    'minimumMutationAmount': minimumMutationAmount,
   };
 }
 
@@ -190,6 +225,9 @@ class StrategyTuningResult {
     this.candidatesTested = 0,
     this.bestProfitCandidate,
     this.bestWinRateCandidate,
+    this.individuals = const [],
+    this.populationState,
+    this.championId,
   });
 
   final String label;
@@ -211,6 +249,9 @@ class StrategyTuningResult {
   final int candidatesTested;
   final Map<String, Object?>? bestProfitCandidate;
   final Map<String, Object?>? bestWinRateCandidate;
+  final List<Map<String, Object?>> individuals;
+  final Map<String, Object?>? populationState;
+  final String? championId;
 
   bool get changed => status == 'improved';
 
@@ -239,6 +280,19 @@ class StrategyTuningResult {
     'candidatesTested': candidatesTested,
     'bestProfitCandidate': bestProfitCandidate,
     'bestWinRateCandidate': bestWinRateCandidate,
+    if (populationState != null) ...{
+      'championId': championId,
+      'populationSummary': {
+        'size': individuals.length,
+        'championId': championId,
+        'candidateId': individuals.firstOrNull?['id'],
+        'candidatePerformance': individuals.firstOrNull?['performance'],
+        'performance': individuals
+            .where((i) => i['id'] == championId)
+            .firstOrNull?['performance'],
+      },
+      'individuals': individuals,
+    },
   };
 }
 
@@ -246,6 +300,11 @@ double _compoundReturn(double first, double second) =>
     ((1 + first / 100) * (1 + second / 100) - 1) * 100;
 
 typedef TuningProgress = ({double fraction, int? remainingSeconds});
+typedef PopulationEvaluation = ({
+  List<SegmentScore> scores,
+  Map<String, Object?> performance,
+  Map<String, Object?> account,
+});
 typedef _PreparedReplay = ({
   int work,
   StrategyTuningResult Function(void Function(int)? onWork) evaluate,
@@ -328,6 +387,34 @@ class StrategyTuner {
 
   StrategyTuningResult tuneOne(StrategySettings settings) =>
       _prepare(settings, {}).evaluate(null);
+
+  /// Uses exactly the same fills, risk limits and native worker fast path as tuning.
+  List<PopulationEvaluation> evaluatePopulation(
+    StrategySettings settings,
+    List<Map<String, double>> candidates, {
+    void Function(int)? onWork,
+  }) {
+    final bars = orderedReplayCandles(
+      watchlist,
+      candlesByInterval[settings.intervalMinutes] ?? {},
+    );
+    final times = bars.map((b) => b.time).toSet().toList()..sort();
+    final cuts = times.length < 3
+        ? <DateTime>[]
+        : [
+            times[(times.length * .6).floor()],
+            times[(times.length * .8).floor()],
+          ];
+    return _replayCandidates(
+      settings,
+      StrategyRegistry.byId(settings.strategyId),
+      bars,
+      cuts,
+      candidates,
+      onWork,
+      captureAccounts: true,
+    );
+  }
 
   _PreparedReplay _prepare(
     StrategySettings settings,
@@ -548,17 +635,17 @@ class StrategyTuner {
     );
   }
 
-  List<({List<SegmentScore> scores, Map<String, Object?> performance})>
-  _replayCandidates(
+  List<PopulationEvaluation> _replayCandidates(
     StrategySettings settings,
     TradingStrategy strategy,
     List<Candle> bars,
     List<DateTime> cuts,
     List<Map<String, double>> candidates,
-    void Function(int)? onWork,
-  ) {
+    void Function(int)? onWork, {
+    bool captureAccounts = false,
+  }) {
     final labels = [for (var i = 0; i < candidates.length; i++) 'c$i'];
-    final engine = risk.createEngine(
+    var engine = risk.createEngine(
       watchlist: watchlist,
       strategies: [
         for (var i = 0; i < candidates.length; i++)
@@ -572,29 +659,82 @@ class StrategyTuner {
       ],
     );
     final tradesAtCuts = <Map<String, int>>[];
-    for (var i = 0; i < bars.length; i++) {
-      final bar = bars[i];
-      if (tradesAtCuts.length < cuts.length &&
-          !bar.time.isBefore(cuts[tradesAtCuts.length])) {
-        tradesAtCuts.add({
-          for (final account in engine.accounts.values)
-            account.label: account.closedTradeCount,
-        });
+    if (strategy is CandidateReplayStrategy) {
+      final replay = (strategy).replayCandidates(
+        checkpoint: engine.checkpoint(),
+        strategies: [
+          for (final setting in engine.strategies)
+            {
+              'strategyId': setting.strategyId,
+              'label': setting.label,
+              'parameters': setting.parameters,
+              'intervalMinutes': setting.intervalMinutes,
+              'startingCash': setting.startingCash,
+            },
+        ],
+        bars: bars,
+        cuts: cuts,
+        retainFills: captureAccounts,
+        onProgress: onWork == null
+            ? null
+            : (count) => onWork(count * candidates.length),
+      );
+      engine = SimulatorEngine.restore(
+        watchlist: watchlist,
+        strategies: engine.strategies,
+        startingCash: engine.startingCash,
+        checkpoint: Map<String, dynamic>.from(replay['checkpoint'] as Map),
+      );
+      tradesAtCuts.addAll(
+        (replay['tradesAtCuts'] as List).map(
+          (row) => (row as Map).map(
+            (key, value) => MapEntry(key as String, value as int),
+          ),
+        ),
+      );
+      onWork?.call(bars.length * candidates.length);
+    } else {
+      for (var i = 0; i < bars.length; i++) {
+        final bar = bars[i];
+        if (tradesAtCuts.length < cuts.length &&
+            !bar.time.isBefore(cuts[tradesAtCuts.length])) {
+          tradesAtCuts.add({
+            for (final account in engine.accounts.values)
+              account.label: account.closedTradeCount,
+          });
+        }
+        engine.process(bar);
+        StrategyRegistry.checkExecutionHealth();
+        // Tuning only needs equity and trade counts, so drop the event log.
+        for (final account in engine.accounts.values) {
+          if (captureAccounts) {
+            account.events.removeWhere((event) => event.kind != 'fill');
+          } else {
+            account.events.clear();
+          }
+        }
+        onWork?.call((i + 1) * candidates.length);
       }
-      engine.process(bar);
-      // Tuning only needs equity and trade counts, so drop the event log.
-      for (final account in engine.accounts.values) {
-        account.events.clear();
-      }
-      onWork?.call((i + 1) * candidates.length);
     }
+    final accounts = captureAccounts
+        ? engine.checkpoint()['accounts'] as Map
+        : const {};
     return [
       for (final label in labels)
         (
+          account: captureAccounts
+              ? {
+                  ...Map<String, Object?>.from(accounts[label] as Map),
+                  'equity': engine.markToMarket(engine.accounts[label]!),
+                  'label': label,
+                }
+              : const <String, Object?>{},
           scores: _scoreSegments(engine.accounts[label]!, cuts, [
             for (final counts in tradesAtCuts) counts[label]!,
           ]),
           performance: portfolioPerformance({
+            if (captureAccounts)
+              ...Map<String, Object?>.from(accounts[label] as Map),
             'startingCash': engine.accounts[label]!.startingCash,
             'equity': engine.markToMarket(engine.accounts[label]!),
             'closedPnl': engine.accounts[label]!.closedPnl,
